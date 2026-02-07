@@ -157,7 +157,7 @@ class ModelManager:
                 start_time = time.time()
                 result = model.predict(text)
                 elapsed = time.time() - start_time
-                
+                logger.info(model_name)
                 if elapsed > timeout:
                     logger.warning(
                         f"Model {model_name} exceeded timeout "
@@ -187,6 +187,7 @@ class ModelManager:
     def get_stats(self) -> Dict[str, Dict[str, int]]:
         """Возвращает статистику использования моделей"""
         return self.model_stats.copy()
+
 
 
 

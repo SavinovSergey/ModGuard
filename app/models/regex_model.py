@@ -3,6 +3,7 @@ import re
 from typing import List, Dict, Any
 
 from app.models.base import BaseToxicityModel
+from app.preprocessing.text_processor import TextProcessor
 
 
 class RegexModel(BaseToxicityModel):
@@ -12,6 +13,7 @@ class RegexModel(BaseToxicityModel):
         super().__init__("regex")
         self.patterns = self._compile_patterns()
         self.toxicity_types = ['ебать', 'хуй', 'бля', 'пиздец', 'говно', 'прочее']
+        self.text_processor = TextProcessor()
     
     def _compile_patterns(self) -> List[re.Pattern]:
         """Компилирует регулярные выражения для поиска нецензурных слов"""
@@ -67,6 +69,9 @@ class RegexModel(BaseToxicityModel):
                 'toxicity_types': {}
             }
         
+        # Предобработка текста
+        text = self.text_processor.process(text)
+
         # Проверяем каждый паттерн
         toxicity_types = {}
         is_toxic = False
@@ -93,6 +98,7 @@ class RegexModel(BaseToxicityModel):
         Returns:
             Список словарей с результатами классификации
         """
+        processed_texts = self.text_processor.process_batch(texts)
         return [self.predict(text) for text in texts]
     
     def get_model_info(self) -> Dict[str, Any]:
@@ -105,6 +111,7 @@ class RegexModel(BaseToxicityModel):
             'description': 'Regex-based toxicity classification model',
             'patterns_count': len(self.patterns)
         }
+
 
 
 

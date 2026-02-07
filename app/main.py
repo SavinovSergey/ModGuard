@@ -36,21 +36,46 @@ async def lifespan(app: FastAPI):
     
     # Регистрация моделей
     logger.info("Registering models...")
+    
+    # Regex модель (всегда доступна)
     regex_model = RegexModel()
     model_manager.register_model("regex", regex_model)
     
-    # Загрузка модели по умолчанию
+    # TF-IDF модель (если обучена)
     try:
-        model_manager.load_model(settings.model_type)
-        logger.info(f"Loaded default model: {settings.model_type}")
+        from app.models.tfidf_model import TfidfModel
+        from pathlib import Path
+        
+        tfidf_model = TfidfModel()
+        model_path = Path("models/tfidf/model.pkl")
+        vectorizer_path = Path("models/tfidf/vectorizer.pkl")
+        
+        if model_path.exists() and vectorizer_path.exists():
+            # print(model_path, str(model_path))
+            tfidf_model.load(
+                model_path=str(model_path),
+                vectorizer_path=str(vectorizer_path)
+            )
+            model_manager.register_model("tfidf", tfidf_model)
+            logger.info("TF-IDF model registered and loaded")
+        else:
+            logger.info("TF-IDF model files not found, skipping registration")
     except Exception as e:
-        logger.error(f"Failed to load default model: {e}")
-        # Пытаемся загрузить regex как fallback
+        logger.warning(f"Could not register TF-IDF model: {e}")
+    
+    # Загрузка модели по умолчанию
+    if not model_manager.models:
         try:
-            model_manager.load_model("regex")
-            logger.info("Loaded regex model as fallback")
-        except Exception as e2:
-            logger.error(f"Failed to load fallback model: {e2}")
+            model_manager.load_model(settings.model_type)
+            logger.info(f"Loaded default model: {settings.model_type}")
+        except Exception as e:
+            logger.error(f"Failed to load default model: {e}")
+            # Пытаемся загрузить regex как fallback
+            try:
+                model_manager.load_model("regex")
+                logger.info("Loaded regex model as fallback")
+            except Exception as e2:
+                logger.error(f"Failed to load fallback model: {e2}")
     
     # Инициализация сервиса классификации
     classification_service = ClassificationService(model_manager)

@@ -1,10 +1,20 @@
 """Pydantic схемы для API"""
 from typing import List, Optional, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class ClassifyRequest(BaseModel):
     """Запрос на классификацию одного комментария"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "text": "Этот комментарий содержит нецензурную лексику",
+                "context": None,
+                "preferred_model": "regex"
+            }
+        }
+    )
+    
     text: str = Field(..., description="Текст комментария для классификации")
     context: Optional[List[str]] = Field(
         None, 
@@ -15,15 +25,6 @@ class ClassifyRequest(BaseModel):
         description="Предпочтительная модель для использования"
     )
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "text": "Этот комментарий содержит нецензурную лексику",
-                "context": None,
-                "preferred_model": "regex"
-            }
-        }
-
 
 class ToxicityType(BaseModel):
     """Тип токсичности с вероятностью"""
@@ -33,6 +34,20 @@ class ToxicityType(BaseModel):
 
 class ClassifyResponse(BaseModel):
     """Ответ на запрос классификации"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "is_toxic": True,
+                "toxicity_score": 0.95,
+                "toxicity_types": {
+                    "ебать": 1.0,
+                    "прочее": 0.8
+                },
+                "model_used": "regex"
+            }
+        }
+    )
+    
     is_toxic: bool = Field(..., description="Токсичен ли комментарий")
     toxicity_score: float = Field(
         ..., 
@@ -53,35 +68,11 @@ class ClassifyResponse(BaseModel):
         description="Ошибка при классификации (если была)"
     )
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "is_toxic": True,
-                "toxicity_score": 0.95,
-                "toxicity_types": {
-                    "ебать": 1.0,
-                    "прочее": 0.8
-                },
-                "model_used": "regex"
-            }
-        }
-
 
 class BatchClassifyRequest(BaseModel):
     """Запрос на batch-классификацию"""
-    texts: List[str] = Field(
-        ..., 
-        min_length=1,
-        max_length=1000,
-        description="Список текстов для классификации (максимум 1000)"
-    )
-    preferred_model: Optional[str] = Field(
-        None,
-        description="Предпочтительная модель для использования"
-    )
-
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "texts": [
                     "Это нормальный комментарий",
@@ -90,22 +81,24 @@ class BatchClassifyRequest(BaseModel):
                 "preferred_model": "regex"
             }
         }
+    )
+    
+    texts: List[str] = Field(
+        ..., 
+        min_length=1,
+        # max_length убран, так как проверка выполняется в коде endpoint
+        description="Список текстов для классификации (максимум 1000)"
+    )
+    preferred_model: Optional[str] = Field(
+        None,
+        description="Предпочтительная модель для использования"
+    )
 
 
 class BatchClassifyResponse(BaseModel):
     """Ответ на batch-запрос"""
-    results: List[ClassifyResponse] = Field(
-        ...,
-        description="Результаты классификации для каждого текста"
-    )
-    total: int = Field(..., description="Общее количество обработанных текстов")
-    model_used: Optional[str] = Field(
-        None,
-        description="Модель, использованная для классификации"
-    )
-
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "results": [
                     {
@@ -123,6 +116,17 @@ class BatchClassifyResponse(BaseModel):
                 "model_used": "regex"
             }
         }
+    )
+    
+    results: List[ClassifyResponse] = Field(
+        ...,
+        description="Результаты классификации для каждого текста"
+    )
+    total: int = Field(..., description="Общее количество обработанных текстов")
+    model_used: Optional[str] = Field(
+        None,
+        description="Модель, использованная для классификации"
+    )
 
 
 class HealthResponse(BaseModel):
@@ -139,6 +143,7 @@ class StatsResponse(BaseModel):
         description="Статистика по каждой модели"
     )
     current_model: Optional[str] = Field(None, description="Текущая активная модель")
+
 
 
 

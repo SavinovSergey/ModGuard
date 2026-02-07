@@ -130,7 +130,7 @@ async def health_check(
 
 @router.get("/stats", response_model=StatsResponse, tags=["monitoring"])
 async def get_stats(
-    service: ClassificationService = Depends(get_classification_service)
+    model_manager = Depends(get_model_manager)
 ):
     """
     Получить статистику использования моделей
@@ -138,7 +138,6 @@ async def get_stats(
     Возвращает статистику ошибок, таймаутов и успешных запросов для каждой модели
     """
     try:
-        model_manager = get_model_manager()
         stats = model_manager.get_stats()
         current_model = model_manager.current_model
         current_model_name = current_model.model_name if current_model else None

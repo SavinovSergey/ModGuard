@@ -1,13 +1,19 @@
 """Конфигурация приложения"""
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from typing import Optional, List
 
 
 class Settings(BaseSettings):
     """Настройки приложения"""
     
+    model_config = ConfigDict(
+        env_file=".env",
+        case_sensitive=False
+    )
+    
     # Модель
-    model_type: str = "regex"  # regex, tfidf, fasttext, rnn, rubert
+    model_type: str = "tfidf"  # regex, tfidf, fasttext, rnn, rubert
     model_path: Optional[str] = None
     fallback_chain: List[str] = ["rubert", "rnn", "tfidf", "regex"]
     
@@ -37,14 +43,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     reload: bool = False
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
 
 
 # Глобальный экземпляр настроек
 settings = Settings()
+
 
 
 

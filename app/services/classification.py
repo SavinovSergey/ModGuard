@@ -43,13 +43,10 @@ class ClassificationService:
                 'toxicity_types': {}
             }
         
-        # Предобработка текста
-        processed_text = self.text_processor.process(text)
-        
         # Получаем модель с fallback
         try:
             result = self.model_manager.predict_with_fallback(
-                processed_text, 
+                text, 
                 preferred_model
             )
             return result
@@ -81,15 +78,12 @@ class ClassificationService:
         if not texts:
             return []
         
-        # Предобработка текстов
-        processed_texts = self.text_processor.process_batch(texts)
-        
         # Получаем модель
         model = self.model_manager.get_model_with_fallback(preferred_model)
         
         try:
             # Используем batch-метод модели, если доступен
-            results = model.predict_batch(processed_texts)
+            results = model.predict_batch(texts)
             return results
         except Exception as e:
             logger.error(f"Batch classification failed: {e}")
@@ -112,6 +106,7 @@ class ClassificationService:
                 'is_loaded': False,
                 'error': 'No model loaded'
             }
+
 
 
 
