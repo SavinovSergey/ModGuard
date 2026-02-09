@@ -39,9 +39,9 @@ class ModelManager:
         }
         logger.info(f"Registered model: {name}")
     
-    def load_model(self, name: str, model_path: Optional[str] = None):
+    def set_current_model(self, name: str):
         """
-        Загружает модель по имени
+        Устанавливает текущую модель по имени
         
         Args:
             name: Имя модели
@@ -54,7 +54,6 @@ class ModelManager:
             raise ValueError(f"Model {name} not registered")
         
         try:
-            self.models[name].load(model_path)
             self.current_model = self.models[name]
             logger.info(f"Loaded model: {name}")
         except Exception as e:

@@ -1,28 +1,19 @@
-"""Скрипт для обучения TF-IDF модели с Optuna оптимизацией"""
+"""Скрипт для обучения FastText модели с Optuna оптимизацией"""
+import os
 import argparse
-import pickle
 import json
 from pathlib import Path
 from typing import Dict, Any
+import tempfile
 
 import numpy as np
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+import fasttext
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
 
-# Проверка наличия optuna
-try:
-    import optuna
-    from optuna.samplers import TPESampler
-except ImportError:
-    raise ImportError(
-        "Optuna не установлен. Установите его командой:\n"
-        "  pip install optuna\n"
-        "или в Jupyter notebook:\n"
-        "  !pip install optuna"
-    )
+import optuna
+from optuna.samplers import TPESampler
 
 # Добавляем путь к app для импорта
 import sys
@@ -31,8 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.preprocessing.text_processor import TextProcessor
 
 
-class TfidfModelTrainer:
-    """Класс для обучения TF-IDF модели с оптимизацией гиперпараметров"""
+class FastTextModelTrainer:
+    """Класс для обучения FastText модели с оптимизацией гиперпараметров"""
     
     def __init__(
         self,
@@ -52,7 +43,6 @@ class TfidfModelTrainer:
         self.text_processor = TextProcessor()
         self.best_params = None
         self.best_model = None
-        self.best_vectorizer = None
         self.best_score = None
     
     def prepare_data(self, df: pd.DataFrame, text_col: str = 'text', label_col: str = 'label'):
@@ -74,8 +64,6 @@ class TfidfModelTrainer:
         
         # Удаляем пустые тексты после обработки
         df = df[df['processed_text'].str.len() > 0]
-
-        df = df.drop_duplicates()
         
         X = df['processed_text'].values
         y = df[label_col].values
@@ -84,6 +72,37 @@ class TfidfModelTrainer:
         print(f"Распределение классов: {np.bincount(y)}")
         
         return X, y
+    
+    def _train_fasttext_model(self, texts: list, labels: list, **kwargs):
+        """
+        Обучение FastText модели
+        
+        Args:
+            texts: Список текстов
+            labels: Список меток (0 или 1)
+            **kwargs: Параметры для fasttext.train_supervised
+        
+        Returns:
+            Обученная FastText модель
+        """
+        # Создаем временный файл для FastText
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+            # FastText требует формат: __label__0 текст или __label__1 текст
+            for text, label in zip(texts, labels):
+                label_str = '__label__1' if label == 1 else '__label__0'
+                f.write(f"{label_str} {text}\n")
+            temp_file = f.name
+        
+        # Обучаем модель
+        model = fasttext.train_supervised(
+            temp_file,
+            **kwargs,
+            verbose=0  # Отключаем вывод
+        )
+        # Удаляем временный файл
+        os.unlink(temp_file)
+        
+        return model
     
     def objective(self, trial, X, y):
         """
@@ -96,58 +115,41 @@ class TfidfModelTrainer:
         
         Returns:
             Средний F1 по кросс-валидации
-        
-        Важно: Векторизатор обучается только на обучающих фолдах,
-        чтобы избежать утечки данных (data leakage).
         """
-        # Параметры для TF-IDF
-        tfidf_params = {
-            'max_features': trial.suggest_int('max_features', 10000, 100000, step=10000),
-            'ngram_range': (
-                1,
-                trial.suggest_int('max_ngram', 1, 3)
-            ),
-            'min_df': trial.suggest_int('min_df', 1, 10),
-            'max_df': trial.suggest_float('max_df', 0.5, 1.0),
-            'sublinear_tf': trial.suggest_categorical('sublinear_tf', [True, False]),
+        # Параметры для FastText
+        fasttext_params = {
+            'dim': trial.suggest_int('dim', 50, 300, step=50),
+            'epoch': trial.suggest_int('epoch', 5, 50),
+            'lr': trial.suggest_float('lr', 0.01, 1.0, log=True),
+            'word_ngrams': trial.suggest_int('word_ngrams', 1, 3),
         }
         
-        # Параметры для Logistic Regression
-        lr_params = {
-            'C': trial.suggest_float('C', 0.01, 100.0, log=True),
-            # 'l1_ratio': 0,
-            'penalty': trial.suggest_categorical('penalty', ['l1', 'l2']),
-            'solver': 'liblinear',  # liblinear работает с l1 и l2
-            'max_iter': 1000,
-            'random_state': self.random_state
-        }
-        
-        # Кросс-валидация с правильным обучением векторизатора
+        # Кросс-валидация
         cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=self.random_state)
         scores = []
         
-        # Для каждого фолда обучаем векторизатор только на train данных
         for train_idx, val_idx in cv.split(X, y):
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
             
-            # Создаем и обучаем векторизатор только на обучающих данных
-            vectorizer = TfidfVectorizer(**tfidf_params)
-            X_train_vectorized = vectorizer.fit_transform(X_train)
-            
-            # Применяем векторизатор к валидационным данным
-            X_val_vectorized = vectorizer.transform(X_val)
-            
             # Обучаем модель на обучающих данных
-            model = LogisticRegression(**lr_params)
-            model.fit(X_train_vectorized, y_train)
+            model = self._train_fasttext_model(
+                X_train.tolist(),
+                y_train.tolist(),
+                **fasttext_params
+            )
             
-            # Предсказываем вероятности на валидационных данных для F1
-            y_pred = model.predict(X_val_vectorized)
+            # Предсказываем вероятности на валидационных данных
+            labels, probas = model.predict(X_val.tolist())
+            y_pred = [1 if l[0].endswith('1') else 0 for l in labels]
+            # y_proba = [p[0] if l else 1 - p[0] for l, p in zip(y_pred, probas)]
             
             # Вычисляем F1
-            score = f1_score(y_val, y_pred)
+            score = f1_score(y_val, y_pred)            
             scores.append(score)
+            
+            # Очищаем память
+            del model
         
         return np.mean(scores)
     
@@ -192,37 +194,25 @@ class TfidfModelTrainer:
         # Обучаем финальную модель на всех данных
         print("\nОбучение финальной модели на всех данных...")
         
-        # Восстанавливаем параметры TF-IDF
-        tfidf_params = {
-            'max_features': self.best_params['max_features'],
-            'ngram_range': (
-                1,
-                self.best_params['max_ngram']
-            ),
-            'min_df': self.best_params['min_df'],
-            'max_df': self.best_params['max_df'],
-            'sublinear_tf': self.best_params['sublinear_tf'],
+        # Восстанавливаем параметры FastText
+        fasttext_params = {
+            'dim': self.best_params['dim'],
+            'epoch': self.best_params['epoch'],
+            'lr': self.best_params['lr'],
+            'word_ngrams': self.best_params['word_ngrams'],
         }
         
-        # Восстанавливаем параметры Logistic Regression
-        lr_params = {
-            'C': self.best_params['C'],
-            'l1_ratio': 0,
-            'solver': 'liblinear',
-            'max_iter': 1000,
-            'random_state': self.random_state,
-        }
+        # Обучаем финальную FastText модель на всех данных
+        self.best_model = self._train_fasttext_model(
+            X.tolist(),
+            y.tolist(),
+            **fasttext_params
+        )
         
-        # Создаем и обучаем финальную модель
-        self.best_vectorizer = TfidfVectorizer(**tfidf_params)
-        X_vectorized = self.best_vectorizer.fit_transform(X)
-        
-        self.best_model = LogisticRegression(**lr_params)
-        self.best_model.fit(X_vectorized, y)
-        
-        # Оценка на всех данных
-        y_pred = self.best_model.predict(X_vectorized)
-        y_proba = self.best_model.predict_proba(X_vectorized)[:, 1]
+        # Предсказываем вероятности на всех данных
+        labels, probas = self.best_model.predict(X.tolist())
+        y_pred = [1 if l[0].endswith('1') else 0 for l in labels]
+        y_proba = [p[0] if l else 1 - p[0] for l, p in zip(y_pred, probas)]
         
         precision = precision_score(y, y_pred)
         recall = recall_score(y, y_pred)
@@ -235,45 +225,36 @@ class TfidfModelTrainer:
         print(f"  Recall: {recall:.4f}")
         print(f"  F1-score: {f1:.4f}")
         
-        return self.best_model, self.best_vectorizer, self.best_params
+        return self.best_model, self.best_params
     
     def save_model(
         self,
         model_path: str,
-        vectorizer_path: str,
         params_path: str = None
     ):
         """
         Сохранение обученной модели
         
         Args:
-            model_path: Путь для сохранения модели
-            vectorizer_path: Путь для сохранения векторизатора
+            model_path: Путь для сохранения классификатора
             params_path: Путь для сохранения параметров (опционально)
         """
-        if self.best_model is None or self.best_vectorizer is None:
+        if self.best_model is None:
             raise ValueError("Модель не обучена. Сначала вызовите train()")
         
         # Создаем директории если нужно
         Path(model_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(vectorizer_path).parent.mkdir(parents=True, exist_ok=True)
         
-        # Сохраняем модель и векторизатор
-        with open(model_path, 'wb') as f:
-            pickle.dump(self.best_model, f)
-        
-        with open(vectorizer_path, 'wb') as f:
-            pickle.dump(self.best_vectorizer, f)
-        
-        print(f"\nМодель сохранена: {model_path}")
-        print(f"Векторизатор сохранен: {vectorizer_path}")
+        # Сохраняем классификатор
+        self.best_model.save_model(model_path)
+        print(f"\nКлассификатор сохранен: {model_path}")
         
         # Сохраняем параметры если указан путь
         if params_path:
             metadata = {
                 'best_params': self.best_params,
                 'best_score': self.best_score,
-                'best_score_metric': 'roc_auc',  # Указываем метрику оптимизации
+                'best_score_metric': 'roc_auc',
                 'n_folds': self.n_folds,
                 'random_state': self.random_state
             }
@@ -284,7 +265,7 @@ class TfidfModelTrainer:
 
 def main():
     """Основная функция для запуска из командной строки"""
-    parser = argparse.ArgumentParser(description='Обучение TF-IDF модели')
+    parser = argparse.ArgumentParser(description='Обучение FastText модели')
     parser.add_argument(
         '--data',
         type=str,
@@ -306,7 +287,7 @@ def main():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='models/tfidf',
+        default='models/fasttext',
         help='Директория для сохранения модели'
     )
     parser.add_argument(
@@ -322,7 +303,7 @@ def main():
     df = pd.read_parquet(args.data)
     
     # Создание trainer
-    trainer = TfidfModelTrainer(
+    trainer = FastTextModelTrainer(
         n_folds=args.n_folds,
         n_trials=args.n_trials
     )
@@ -338,8 +319,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     trainer.save_model(
-        model_path=str(output_dir / 'model.pkl'),
-        vectorizer_path=str(output_dir / 'vectorizer.pkl'),
+        model_path=str(output_dir / 'fasttext_model.bin'),
         params_path=str(output_dir / 'params.json')
     )
     
@@ -348,4 +328,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

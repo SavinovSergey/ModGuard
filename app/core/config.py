@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
     
     # Модель
-    model_type: str = "tfidf"  # regex, tfidf, fasttext, rnn, rubert
+    model_type: str = "fasttext"  # regex, tfidf, fasttext, rnn, rubert
     model_path: Optional[str] = None
     fallback_chain: List[str] = ["rubert", "rnn", "tfidf", "regex"]
     
