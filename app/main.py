@@ -79,6 +79,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not register FastText model: {e}")
     
+    # RNN модель (если обучена)
+    try:
+        from app.models.rnn_model import RNNModel
+        
+        rnn_model = RNNModel()
+        model_path = Path("models/rnn/model.pt")
+        tokenizer_path = Path("models/rnn/tokenizer.json")
+        
+        if model_path.exists() and tokenizer_path.exists():
+            rnn_model.load(
+                model_path=str(model_path),
+                tokenizer_path=str(tokenizer_path)
+            )
+            model_manager.register_model("rnn", rnn_model)
+            logger.info("RNN model registered and loaded")
+        else:
+            logger.info("RNN model files not found, skipping registration")
+    except Exception as e:
+        logger.warning(f"Could not register RNN model: {e}")
+    
     # Загрузка модели по умолчанию
     try:
         model_manager.set_current_model(settings.model_type)

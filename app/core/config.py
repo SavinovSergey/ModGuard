@@ -9,7 +9,8 @@ class Settings(BaseSettings):
     
     model_config = ConfigDict(
         env_file=".env",
-        case_sensitive=False
+        case_sensitive=False,
+        extra='ignore'  # Игнорировать дополнительные поля из .env, которых нет в модели
     )
     
     # Модель
