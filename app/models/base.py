@@ -1,70 +1,101 @@
-"""Базовый интерфейс для всех моделей классификации токсичности"""
+"""Base abstractions for toxicity classification model wrappers."""
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
+from app.preprocessing.text_processor import TextProcessor
 
 
 class BaseToxicityModel(ABC):
-    """Базовый класс для всех моделей классификации токсичности"""
-    
-    def __init__(self, model_name: str):
+    """Common contract and helpers for all toxicity model wrappers."""
+
+    def __init__(self, model_name: str, model_type: str):
         self.model_name = model_name
+        self.model_type = model_type
         self.is_loaded = False
-    
+
     @abstractmethod
-    def load(self, model_path: str = None) -> None:
-        """
-        Загружает модель из файла или инициализирует
-        
-        Args:
-            model_path: Путь к файлу модели (опционально)
-        """
-        pass
-    
+    def load(self, model_path: str = None, **kwargs) -> None:
+        """Load model weights/artifacts from disk or external source."""
+
     @abstractmethod
     def predict(self, text: str) -> Dict[str, Any]:
-        """
-        Предсказывает токсичность для одного текста
-        
-        Args:
-            text: Предобработанный текст для классификации
-        
-        Returns:
-            {
-                'is_toxic': bool,
-                'toxicity_score': float,  # 0-1
-                'toxicity_types': Dict[str, float]  # опционально
-            }
-        """
-        pass
-    
-    @abstractmethod
+        """Predict toxicity for a single text."""
+
     def predict_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
-        """
-        Предсказывает токсичность для батча текстов
-        
-        Args:
-            texts: Список предобработанных текстов
-        
-        Returns:
-            Список словарей с результатами классификации
-        """
-        pass
-    
+        """Fallback batch inference via sequential `predict` calls."""
+        return [self.predict(text) for text in texts]
+
+    def ensure_loaded(self) -> None:
+        """Raise if model is not loaded yet."""
+        if not self.is_loaded:
+            raise RuntimeError("Model is not loaded. Call load() first.")
+
+    @staticmethod
+    def empty_result() -> Dict[str, Any]:
+        """Unified empty/non-inferable result payload."""
+        return {
+            "is_toxic": False,
+            "toxicity_score": 0.0,
+            "toxicity_types": {},
+        }
+
+    def _base_info(self, description: str, version: str = "1.0.0") -> Dict[str, Any]:
+        """Base info payload for `get_model_info` methods."""
+        return {
+            "name": self.model_name,
+            "type": self.model_type,
+            "is_loaded": self.is_loaded,
+            "version": version,
+            "description": description,
+        }
+
     @abstractmethod
     def get_model_info(self) -> Dict[str, Any]:
-        """
-        Возвращает информацию о модели
-        
-        Returns:
-            {
-                'name': str,
-                'type': str,
-                'is_loaded': bool,
-                'version': str,
-                'description': str
-            }
-        """
-        pass
+        """Return model info and runtime metadata."""
+
+
+class ClassicalTextModelBase(BaseToxicityModel, ABC):
+    """Base for regex/tfidf/fasttext models using full text processing."""
+
+    def __init__(self, model_name: str, model_type: str):
+        super().__init__(model_name=model_name, model_type=model_type)
+        self.text_processor = TextProcessor()
+
+    def preprocess_text(self, text: str) -> str:
+        if text is None or not isinstance(text, str):
+            return ""
+        return self.text_processor.process(text)
+
+    def preprocess_batch(self, texts: List[str]) -> List[str]:
+        return self.text_processor.process_batch(texts)
+
+    @staticmethod
+    def non_empty_indexes(texts: List[str]) -> List[int]:
+        return [i for i, text in enumerate(texts) if text and text.strip()]
+
+
+class NeuralTextModelBase(BaseToxicityModel, ABC):
+    """Base for neural wrappers using normalization-only preprocessing."""
+
+    def __init__(self, model_name: str, model_type: str):
+        super().__init__(model_name=model_name, model_type=model_type)
+        self.text_processor = TextProcessor(use_lemmatization=False, remove_stopwords=False)
+
+    def preprocess_text(self, text: str) -> str:
+        if text is None or not isinstance(text, str):
+            return ""
+        return self.text_processor.normalize(text)
+
+    def preprocess_batch(self, texts: List[str]) -> List[str]:
+        if not texts:
+            return []
+        return [self.preprocess_text(text) for text in texts]
+
+    @staticmethod
+    def non_empty_indexes(texts: List[str]) -> List[int]:
+        return [i for i, text in enumerate(texts) if text and text.strip()]
 
 
 

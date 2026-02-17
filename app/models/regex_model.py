@@ -2,18 +2,16 @@
 import re
 from typing import List, Dict, Any
 
-from app.models.base import BaseToxicityModel
-from app.preprocessing.text_processor import TextProcessor
+from app.models.base import ClassicalTextModelBase
 
 
-class RegexModel(BaseToxicityModel):
+class RegexModel(ClassicalTextModelBase):
     """Модель классификации токсичности на основе регулярных выражений"""
     
     def __init__(self):
-        super().__init__("regex")
+        super().__init__(model_name="regex", model_type="regex")
         self.patterns = self._compile_patterns()
         self.toxicity_types = ['ебать', 'хуй', 'бля', 'пиздец', 'говно', 'прочее']
-        self.text_processor = TextProcessor()
     
     def _compile_patterns(self) -> List[re.Pattern]:
         """Компилирует регулярные выражения для поиска нецензурных слов"""
@@ -63,14 +61,12 @@ class RegexModel(BaseToxicityModel):
             Словарь с результатами классификации
         """
         if not text:
-            return {
-                'is_toxic': False,
-                'toxicity_score': 0.0,
-                'toxicity_types': {}
-            }
+            return self.empty_result()
         
         # Предобработка текста
-        text = self.text_processor.process(text)
+        text = self.preprocess_text(text)
+        if not text:
+            return self.empty_result()
 
         # Проверяем каждый паттерн
         toxicity_types = {}
@@ -98,19 +94,14 @@ class RegexModel(BaseToxicityModel):
         Returns:
             Список словарей с результатами классификации
         """
-        processed_texts = self.text_processor.process_batch(texts)
-        return [self.predict(text) for text in texts]
+        processed_texts = self.preprocess_batch(texts)
+        return [self.predict(text) for text in processed_texts]
     
     def get_model_info(self) -> Dict[str, Any]:
         """Возвращает информацию о модели"""
-        return {
-            'name': self.model_name,
-            'type': 'regex',
-            'is_loaded': self.is_loaded,
-            'version': '1.0.0',
-            'description': 'Regex-based toxicity classification model',
-            'patterns_count': len(self.patterns)
-        }
+        info = self._base_info("Regex-based toxicity classification model")
+        info["patterns_count"] = len(self.patterns)
+        return info
 
 
 
