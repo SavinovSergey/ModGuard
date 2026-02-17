@@ -9,12 +9,10 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     average_precision_score,
-    precision_recall_curve,
     f1_score,
     precision_score,
     recall_score
@@ -30,37 +28,21 @@ from transformers import (
 from tqdm import tqdm
 
 # Добавляем путь к app для импорта
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.preprocessing.text_processor import TextProcessor
-
-
-class BinaryFocalLoss(nn.Module):
-    """Focal Loss для бинарной классификации (вход: logits)."""
-
-    def __init__(self, alpha: float = None, gamma: float = 2.0, reduction: str = "mean"):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        targets = targets.float()
-        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
-        probs = torch.sigmoid(logits)
-        p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
-        focal_factor = (1.0 - p_t).pow(self.gamma)
-        loss = focal_factor * bce_loss
-
-        if self.alpha is not None:
-            alpha_t = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
-            loss = alpha_t * loss
-
-        if self.reduction == "mean":
-            return loss.mean()
-        if self.reduction == "sum":
-            return loss.sum()
-        return loss
+from scripts.training.cli import (
+    add_common_data_args,
+    add_common_loss_args,
+    add_common_output_arg,
+    add_common_random_state_arg,
+)
+from scripts.training.common import (
+    BinaryFocalLoss,
+    compute_auto_alpha,
+    convert_to_json_serializable,
+    find_optimal_threshold,
+)
+from scripts.training.data import load_train_val_data, prepare_texts_neural
 
 
 class ToxicityDataset(Dataset):
@@ -167,7 +149,6 @@ class BERTModelTrainer:
         self.focal_auto_alpha = focal_auto_alpha
         self.reduction = reduction
         
-        self.text_processor = TextProcessor(use_lemmatization=False, remove_stopwords=False)
         self.tokenizer = None
         self.model = None
         self.best_score = 0.0
@@ -179,6 +160,25 @@ class BERTModelTrainer:
         np.random.seed(random_state)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(random_state)
+
+    @staticmethod
+    def _find_optimal_threshold(
+        y_true: np.ndarray,
+        y_proba: np.ndarray,
+        min_precision: float = 0.9,
+    ) -> Tuple[float, float, float]:
+        """Backward-compatible wrapper around shared threshold search."""
+        return find_optimal_threshold(y_true, y_proba, min_precision=min_precision)
+
+    @staticmethod
+    def _compute_auto_alpha(y_train: np.ndarray) -> float:
+        """Backward-compatible wrapper around shared auto-alpha logic."""
+        return compute_auto_alpha(y_train)
+
+    @staticmethod
+    def _convert_to_json_serializable(obj):
+        """Backward-compatible wrapper around shared JSON conversion."""
+        return convert_to_json_serializable(obj)
     
     def prepare_data(
         self, 
@@ -197,23 +197,7 @@ class BERTModelTrainer:
         Returns:
             X_processed, y
         """
-        print("Предобработка текста...")
-        df = df.copy()
-        
-        # Только нормализация, без лемматизации
-        df['processed_text'] = df[text_col].apply(self.text_processor.normalize)
-        
-        # Удаляем пустые тексты после обработки
-        df = df[df['processed_text'].str.len() > 0]
-        
-        X = df['processed_text'].tolist()
-        y = df[label_col].values.astype(np.float32)
-        
-        print(f"Подготовлено {len(X)} примеров")
-        print(f"Распределение классов: {np.bincount(y.astype(int))}")
-        print(f"Уникальные значения меток: {np.unique(y)}")
-        
-        return X, y
+        return prepare_texts_neural(df, text_col=text_col, label_col=label_col)
     
     def load_model_and_tokenizer(self):
         """Загружает модель и токенизатор"""
@@ -271,68 +255,6 @@ class BERTModelTrainer:
         print(f"  Параметров: {sum(p.numel() for p in self.model.parameters()):,}")
         print(f"  Обучаемых параметров: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
     
-    @staticmethod
-    def _find_optimal_threshold(
-        y_true: np.ndarray, 
-        y_proba: np.ndarray, 
-        min_precision: float = 0.9
-    ) -> Tuple[float, float, float]:
-        """
-        Находит оптимальный порог, максимизирующий recall при Precision >= min_precision.
-        
-        Args:
-            y_true: Истинные метки
-            y_proba: Предсказанные вероятности
-            min_precision: Минимальное значение precision (по умолчанию 0.9)
-        
-        Returns:
-            optimal_threshold: Оптимальный порог
-            best_precision: Precision при оптимальном пороге
-            best_recall: Recall при оптимальном пороге
-        """
-        precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
-        
-        # precision_recall_curve возвращает precision и recall длиной len(thresholds) + 1
-        # Последний элемент (precision=1.0, recall=0.0) не соответствует реальному порогу
-        precision = precision[:-1]
-        recall = recall[:-1]
-        
-        # Находим индексы, где precision >= min_precision
-        valid_indices = np.where(precision >= min_precision)[0]
-        
-        if len(valid_indices) > 0:
-            # Выбираем порог с максимальным recall среди тех, где precision >= min_precision
-            best_idx = valid_indices[np.argmax(recall[valid_indices])]
-            optimal_threshold = thresholds[best_idx] if best_idx < len(thresholds) else thresholds[-1] if len(thresholds) > 0 else 0.5
-            best_precision = precision[best_idx]
-            best_recall = recall[best_idx]
-        else:
-            # Если не удалось достичь min_precision, берем порог с максимальным recall
-            best_idx = np.argmax(recall)
-            optimal_threshold = thresholds[best_idx] if best_idx < len(thresholds) else thresholds[-1] if len(thresholds) > 0 else 0.5
-            best_precision = precision[best_idx]
-            best_recall = recall[best_idx]
-            print(f"  Предупреждение: не удалось достичь precision >= {min_precision:.2f}, используется максимальный recall")
-        
-        return optimal_threshold, best_precision, best_recall
-    
-    def _compute_auto_alpha(self, y_train: np.ndarray) -> float:
-        """
-        Оценивает alpha для Focal Loss:
-        alpha = доля отрицательного класса, чтобы усилить вклад редкого положительного класса.
-        """
-        positives = float(np.sum(y_train > 0.5))
-        negatives = float(np.sum(y_train <= 0.5))
-        total = positives + negatives
-        if total == 0:
-            return 0.5
-        if positives == 0 or negatives == 0:
-            return 0.5
-        alpha = negatives / total
-        # Защита от экстремумов
-        return float(np.clip(alpha, 0.05, 0.95))
-
-
     def train(
         self,
         X_train: List[str],
@@ -388,7 +310,7 @@ class BERTModelTrainer:
         )
 
         # Подготовка alpha для focal loss
-        alpha = self.focal_alpha if self.focal_alpha is not None else self._compute_auto_alpha(y_train)
+        alpha = self.focal_alpha if self.focal_alpha is not None else compute_auto_alpha(y_train)
 
         if self.no_freeze:
             # Создаём параметры с разными скоростями обучения
@@ -452,7 +374,7 @@ class BERTModelTrainer:
         if self.loss_type == 'focal':
             alpha = self.focal_alpha
             if alpha is None and self.focal_auto_alpha:
-                alpha = self._compute_auto_alpha(y_train)
+                alpha = compute_auto_alpha(y_train)
             criterion = BinaryFocalLoss(alpha=alpha, gamma=self.focal_gamma)
             self.loss_alpha_used = alpha
             print(f"  Focal Loss: gamma={self.focal_gamma}, alpha={alpha}")
@@ -588,7 +510,7 @@ class BERTModelTrainer:
         val_probs_final = np.array(val_probs_final)
         val_labels_final = np.array(val_labels_final)
 
-        optimal_threshold, opt_precision, opt_recall = self._find_optimal_threshold(
+        optimal_threshold, opt_precision, opt_recall = find_optimal_threshold(
             val_labels_final, val_probs_final, min_precision=0.9
         )
 
@@ -607,27 +529,6 @@ class BERTModelTrainer:
         self.tokenizer.save_pretrained(output_dir)
 
         print(f"\nМодель сохранена в {output_dir}")
-    
-    @staticmethod
-    def _convert_to_json_serializable(obj):
-        """
-        Преобразует numpy типы и другие несериализуемые объекты в стандартные Python типы.
-        """
-        if isinstance(obj, (np.integer, np.floating)):
-            return obj.item()
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {key: BERTModelTrainer._convert_to_json_serializable(value) for key, value in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [BERTModelTrainer._convert_to_json_serializable(item) for item in obj]
-        elif isinstance(obj, (bool, int, float, str, type(None))):
-            return obj
-        else:
-            try:
-                return str(obj)
-            except:
-                return repr(obj)
     
     def save_params(self, params_path: str):
         """Сохраняет параметры модели в JSON"""
@@ -655,7 +556,7 @@ class BERTModelTrainer:
         }
         
         # Преобразуем numpy типы
-        metadata = self._convert_to_json_serializable(metadata)
+        metadata = convert_to_json_serializable(metadata)
         
         with open(params_path, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
@@ -665,30 +566,8 @@ class BERTModelTrainer:
 def main():
     """Основная функция для запуска из командной строки"""
     parser = argparse.ArgumentParser(description='Дообучение BERT модели для классификации токсичности')
-    parser.add_argument(
-        '--data',
-        type=str,
-        default=None,
-        help='Путь к обучающим данным (используется если не заданы --train-data и --val-data)'
-    )
-    parser.add_argument(
-        '--train-data',
-        type=str,
-        default=None,
-        help='Путь к обучающим данным'
-    )
-    parser.add_argument(
-        '--val-data',
-        type=str,
-        default=None,
-        help='Путь к валидационным данным'
-    )
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        default='models/bert',
-        help='Директория для сохранения модели'
-    )
+    add_common_data_args(parser)
+    add_common_output_arg(parser, default_output_dir='models/bert')
     parser.add_argument(
         '--model-name',
         type=str,
@@ -775,54 +654,17 @@ def main():
         default=0.1,
         help='Dropout для классификационной головы'
     )
-    parser.add_argument(
-        '--random-state',
-        type=int,
-        default=42,
-        help='Random state для воспроизводимости'
-    )
-    parser.add_argument(
-        '--loss-type',
-        type=str,
-        choices=['bce', 'focal'],
-        default='bce',
-        help='Тип функции потерь (bce или focal)'
-    )
-    parser.add_argument(
-        '--focal-gamma',
-        type=float,
-        default=2.0,
-        help='Параметр gamma для focal loss'
-    )
-    parser.add_argument(
-        '--focal-alpha',
-        type=float,
-        default=None,
-        help='Параметр alpha для focal loss (если не задан, можно оценить автоматически)'
-    )
-    parser.add_argument(
-        '--focal-auto-alpha',
-        action='store_true',
-        help='Автоматически оценивать alpha по train-сплиту'
-    )
+    add_common_random_state_arg(parser)
+    add_common_loss_args(parser)
     parser.set_defaults(focal_auto_alpha=True)
     
     args = parser.parse_args()
     
-    # Определяем режим работы
-    if args.train_data is not None and args.val_data is not None:
-        # Режим с отдельными train/val файлами
-        print(f"Загрузка обучающих данных из {args.train_data}...")
-        df_train = pd.read_parquet(args.train_data)
-        print(f"Загрузка валидационных данных из {args.val_data}...")
-        df_val = pd.read_parquet(args.val_data)
-    elif args.data is not None:
-        # Режим с одним файлом (train/val split)
-        print(f"Загрузка данных из {args.data}...")
-        df_train = pd.read_parquet(args.data)
-        df_val = None
-    else:
-        raise ValueError("Необходимо указать либо --data, либо --train-data и --val-data")
+    df_train, df_val, _ = load_train_val_data(
+        data_path=args.data,
+        train_data_path=args.train_data,
+        val_data_path=args.val_data,
+    )
     
     # Создание trainer
     trainer = BERTModelTrainer(

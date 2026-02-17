@@ -10,16 +10,23 @@ import numpy as np
 import pandas as pd
 import fasttext
 from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, average_precision_score, precision_recall_curve
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, average_precision_score
 
 import optuna
 from optuna.samplers import TPESampler
 
 # Добавляем путь к app для импорта
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.preprocessing.text_processor import TextProcessor
+from scripts.training.cli import (
+    add_common_data_args,
+    add_common_optuna_args,
+    add_common_output_arg,
+    add_common_random_state_arg,
+)
+from scripts.training.common import find_optimal_threshold
+from scripts.training.data import load_train_val_data, prepare_texts_classical
 
 
 class FastTextModelTrainer:
@@ -43,53 +50,19 @@ class FastTextModelTrainer:
         self.n_trials = n_trials
         self.use_cv = use_cv
         self.random_state = random_state
-        self.text_processor = TextProcessor()
         self.best_params = None
         self.best_model = None
         self.best_score = None
         self.optimal_threshold = 0.5  # Оптимальный порог будет установлен после обучения
-    
+
     @staticmethod
-    def _find_optimal_threshold(y_true: np.ndarray, y_proba: np.ndarray, min_precision: float = 0.9) -> tuple:
-        """
-        Находит оптимальный порог, максимизирующий recall при Precision >= min_precision.
-        
-        Args:
-            y_true: Истинные метки
-            y_proba: Предсказанные вероятности
-            min_precision: Минимальное значение precision (по умолчанию 0.9)
-        
-        Returns:
-            optimal_threshold: Оптимальный порог
-            best_precision: Precision при оптимальном пороге
-            best_recall: Recall при оптимальном пороге
-        """
-        precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
-        
-        # precision_recall_curve возвращает precision и recall длиной len(thresholds) + 1
-        # Последний элемент (precision=1.0, recall=0.0) не соответствует реальному порогу
-        # Исключаем последний элемент из рассмотрения
-        precision = precision[:-1]
-        recall = recall[:-1]
-        
-        # Находим индексы, где precision >= min_precision
-        valid_indices = np.where(precision >= min_precision)[0]
-        
-        if len(valid_indices) > 0:
-            # Выбираем порог с максимальным recall среди тех, где precision >= min_precision
-            best_idx = valid_indices[np.argmax(recall[valid_indices])]
-            optimal_threshold = thresholds[best_idx] if best_idx < len(thresholds) else thresholds[-1] if len(thresholds) > 0 else 0.5
-            best_precision = precision[best_idx]
-            best_recall = recall[best_idx]
-        else:
-            # Если не удалось достичь min_precision, берем порог с максимальным recall
-            best_idx = np.argmax(recall)
-            optimal_threshold = thresholds[best_idx] if best_idx < len(thresholds) else thresholds[-1] if len(thresholds) > 0 else 0.5
-            best_precision = precision[best_idx]
-            best_recall = recall[best_idx]
-            print(f"  Предупреждение: не удалось достичь precision >= {min_precision:.2f}, используется максимальный recall")
-        
-        return optimal_threshold, best_precision, best_recall
+    def _find_optimal_threshold(
+        y_true: np.ndarray,
+        y_proba: np.ndarray,
+        min_precision: float = 0.9,
+    ) -> tuple:
+        """Backward-compatible wrapper around shared threshold search."""
+        return find_optimal_threshold(y_true, y_proba, min_precision=min_precision)
     
     def prepare_data(self, df: pd.DataFrame, text_col: str = 'text', label_col: str = 'label'):
         """
@@ -103,21 +76,7 @@ class FastTextModelTrainer:
         Returns:
             X_processed, y
         """
-        # Предобработка текста
-        print("Предобработка текста...")
-        df = df.copy()
-        df['processed_text'] = df[text_col].apply(self.text_processor.process)
-        
-        # Удаляем пустые тексты после обработки
-        df = df[df['processed_text'].str.len() > 0]
-        
-        X = df['processed_text'].values
-        y = df[label_col].values
-        
-        print(f"Подготовлено {len(X)} примеров")
-        print(f"Распределение классов: {np.bincount(y)}")
-        
-        return X, y
+        return prepare_texts_classical(df, text_col=text_col, label_col=label_col)
     
     def _train_fasttext_model(self, texts: list, labels: list, **kwargs):
         """
@@ -301,7 +260,7 @@ class FastTextModelTrainer:
             y_true = y_train
         
         # Подбираем оптимальный порог для максимизации recall при Precision >= 90%
-        self.optimal_threshold, opt_precision, opt_recall = self._find_optimal_threshold(
+        self.optimal_threshold, opt_precision, opt_recall = find_optimal_threshold(
             y_true, y_proba, min_precision=0.9
         )
         
@@ -367,72 +326,24 @@ class FastTextModelTrainer:
 def main():
     """Основная функция для запуска из командной строки"""
     parser = argparse.ArgumentParser(description='Обучение FastText модели')
-    parser.add_argument(
-        '--data',
-        type=str,
-        default=None,
-        help='Путь к обучающим данным (используется если не заданы --train-data и --val-data)'
-    )
-    parser.add_argument(
-        '--train-data',
-        type=str,
-        default=None,
-        help='Путь к обучающим данным'
-    )
-    parser.add_argument(
-        '--val-data',
-        type=str,
-        default=None,
-        help='Путь к валидационным данным (требуется при --no-use-cv)'
-    )
-    parser.add_argument(
-        '--n-folds',
-        type=int,
-        default=5,
-        help='Количество фолдов для кросс-валидации (используется только если --use-cv)'
-    )
-    parser.add_argument(
-        '--n-trials',
-        type=int,
-        default=50,
-        help='Количество trials для Optuna'
-    )
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        default='models/fasttext',
-        help='Директория для сохранения модели'
-    )
-    parser.add_argument(
-        '--study-name',
-        type=str,
-        default=None,
-        help='Имя study для Optuna'
-    )
+    add_common_data_args(parser)
+    add_common_optuna_args(parser)
+    add_common_output_arg(parser, default_output_dir='models/fasttext')
+    add_common_random_state_arg(parser)
     args = parser.parse_args()
     
-    # Определяем режим работы
-    if args.train_data is not None and args.val_data is not None:
-        # Режим с отдельными train/val файлами
-        use_cv = False
-        print(f"Загрузка обучающих данных из {args.train_data}...")
-        df_train = pd.read_parquet(args.train_data)
-        print(f"Загрузка валидационных данных из {args.val_data}...")
-        df_val = pd.read_parquet(args.val_data)
-    elif args.data is not None:
-        # Режим с одним файлом (кросс-валидация)
-        use_cv = True
-        print(f"Загрузка данных из {args.data}...")
-        df_train = pd.read_parquet(args.data)
-        df_val = None
-    else:
-        raise ValueError("Необходимо указать либо --data, либо --train-data и --val-data")
+    df_train, df_val, use_cv = load_train_val_data(
+        data_path=args.data,
+        train_data_path=args.train_data,
+        val_data_path=args.val_data,
+    )
     
     # Создание trainer
     trainer = FastTextModelTrainer(
         n_folds=args.n_folds,
         n_trials=args.n_trials,
-        use_cv=use_cv
+        use_cv=use_cv,
+        random_state=args.random_state,
     )
     
     # Подготовка данных
