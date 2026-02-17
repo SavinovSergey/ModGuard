@@ -123,6 +123,7 @@ def test_fasttext_model_predict_empty_text(fasttext_model):
     result = fasttext_model.predict("")
     
     assert result['is_toxic'] is False
+    # Пустые тексты должны возвращать нулевую вероятность
     assert result['toxicity_score'] == 0.0
     assert result['toxicity_types'] == {}
 
@@ -132,6 +133,7 @@ def test_fasttext_model_predict_whitespace(fasttext_model):
     result = fasttext_model.predict("   ")
     
     assert result['is_toxic'] is False
+    # Тексты только с пробелами должны возвращать нулевую вероятность
     assert result['toxicity_score'] == 0.0
 
 
@@ -214,6 +216,7 @@ def test_fasttext_model_predict_batch_all_empty(fasttext_model):
     assert len(results) == 3
     for result in results:
         assert result['is_toxic'] is False
+        # Пустые тексты должны возвращать нулевую вероятность
         assert result['toxicity_score'] == 0.0
 
 
