@@ -35,6 +35,13 @@ from scripts.training.common import (
 )
 from scripts.training.data import load_train_val_data, prepare_texts_neural
 
+# Опциональный импорт для квантизации RNN
+try:
+    from scripts.quantize_rnn import quantize_rnn_model
+    _HAS_QUANTIZE_RNN = True
+except ImportError:
+    _HAS_QUANTIZE_RNN = False
+
 
 class RNNModelTrainer:
     """Класс для обучения RNN модели"""
@@ -740,6 +747,24 @@ def main():
         default=0.5,
         help='Фактор уменьшения learning rate: для plateau - множитель при снижении, для lambda - коэффициент экспоненциального затухания'
     )
+    parser.add_argument(
+        '--quantize',
+        action='store_true',
+        help='После обучения применить динамическую квантизацию модели',
+    )
+    parser.add_argument(
+        '--quantize-output-dir',
+        type=str,
+        default=None,
+        help='Директория для квантизированной модели (по умолчанию: <output_dir>_quantized)',
+    )
+    parser.add_argument(
+        '--quantize-dtype',
+        type=str,
+        choices=['qint8', 'float16'],
+        default='qint8',
+        help='Тип квантизации: qint8 (int8) или float16 (FP16)',
+    )
     args = parser.parse_args()
     
     df_train, df_val, use_cv = load_train_val_data(
@@ -801,6 +826,25 @@ def main():
         tokenizer_path=str(output_dir / 'tokenizer.json'),
         params_path=str(output_dir / 'params.json')
     )
+
+    # Опциональная квантизация
+    if args.quantize:
+        if not _HAS_QUANTIZE_RNN:
+            print("\nВнимание: модуль квантизации не найден. Пропуск квантизации.")
+            print("Убедитесь, что скрипт quantize_rnn.py доступен.")
+        else:
+            import torch
+            quantize_dir = args.quantize_output_dir or f"{output_dir}_quantized"
+            dtype_map = {"qint8": torch.qint8, "float16": torch.float16}
+            dtype = dtype_map[args.quantize_dtype]
+            print(f"\nПрименение динамической квантизации ({args.quantize_dtype}) -> {quantize_dir}")
+            quantize_rnn_model(
+                str(output_dir / 'model.pt'),
+                str(output_dir / 'tokenizer.json'),
+                quantize_dir,
+                device=trainer.device,
+                dtype=dtype,
+            )
     
     print("\nОбучение завершено!")
 

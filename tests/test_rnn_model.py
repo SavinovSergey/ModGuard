@@ -4,6 +4,8 @@ import tempfile
 from pathlib import Path
 import torch
 import numpy as np
+import json
+import shutil
 
 from app.models.rnn_model import RNNModel
 from app.models.rnn_tokenizers import BPETokenizer
@@ -100,6 +102,77 @@ def temp_model_files_bpe():
 def rnn_model(temp_model_files_bpe):
     """Создает и загружает RNN модель для тестирования"""
     model_path, tokenizer_path = temp_model_files_bpe
+    model = RNNModel()
+    model.load(model_path=model_path, tokenizer_path=tokenizer_path)
+    return model
+
+
+@pytest.fixture
+def temp_model_files_bpe_quantized(temp_model_files_bpe):
+    """Создает квантизованную версию модели из temp_model_files_bpe"""
+    model_path, tokenizer_path = temp_model_files_bpe
+    model_dir = Path(model_path).parent
+    
+    # Создаем директорию для квантизированной модели
+    quantized_dir = model_dir / "quantized"
+    quantized_dir.mkdir(exist_ok=True)
+    
+    # Копируем токенизатор
+    quantized_tokenizer_path = quantized_dir / Path(tokenizer_path).name
+    shutil.copy(tokenizer_path, quantized_tokenizer_path)
+    
+    # Копируем params.json
+    params_path = model_dir / "params.json"
+    quantized_params_path = quantized_dir / "params.json"
+    if params_path.exists():
+        shutil.copy(params_path, quantized_params_path)
+    
+    # Квантизируем модель
+    try:
+        from scripts.quantize_rnn import quantize_rnn_model
+    except ImportError:
+        pytest.skip("Скрипт квантизации не найден")
+    
+    quantize_rnn_model(
+        model_path=model_path,
+        tokenizer_path=tokenizer_path,
+        output_dir=quantized_dir,
+        device="cpu",
+        dtype=torch.qint8
+    )
+    
+    # Возвращаем пути к квантизированной модели
+    quantized_model_path = quantized_dir / "model_quantized.pt"
+    yield str(quantized_model_path), str(quantized_tokenizer_path)
+
+
+@pytest.fixture
+def rnn_model_pytorch(temp_model_files_bpe):
+    """Создает и загружает оригинальную PyTorch RNN модель для тестирования"""
+    model_path, tokenizer_path = temp_model_files_bpe
+    # Убеждаемся, что params.json не содержит флаг quantized
+    model_dir = Path(model_path).parent
+    params_path = model_dir / "params.json"
+    if params_path.exists():
+        with open(params_path, 'r', encoding='utf-8') as f:
+            params = json.load(f)
+        # Удаляем флаг quantized если он есть
+        params.pop('quantized', None)
+        params.pop('quantization_dtype', None)
+        params.pop('quantization_method', None)
+        params.pop('embeddings_quantized_fp16', None)
+        with open(params_path, 'w', encoding='utf-8') as f:
+            json.dump(params, f, indent=2)
+    
+    model = RNNModel()
+    model.load(model_path=model_path, tokenizer_path=tokenizer_path)
+    return model
+
+
+@pytest.fixture
+def rnn_model_quantized(temp_model_files_bpe_quantized):
+    """Создает и загружает квантизированную RNN модель для тестирования"""
+    model_path, tokenizer_path = temp_model_files_bpe_quantized
     model = RNNModel()
     model.load(model_path=model_path, tokenizer_path=tokenizer_path)
     return model
@@ -312,6 +385,119 @@ def test_rnn_model_load_with_instance_paths(temp_model_files_bpe):
     assert model.is_loaded
     assert model.model is not None
     assert model.tokenizer is not None
+
+
+# --- Тесты для квантизированной RNN модели ---
+
+
+def test_rnn_model_quantized_predict(rnn_model_quantized):
+    """Тест предсказания квантизированной RNN модели."""
+    result = rnn_model_quantized.predict("это тестовый комментарий")
+    assert isinstance(result, dict)
+    assert "is_toxic" in result
+    assert "toxicity_score" in result
+    assert "toxicity_types" in result
+    assert isinstance(result["toxicity_score"], float)
+    assert 0.0 <= result["toxicity_score"] <= 1.0
+
+
+def test_rnn_model_quantized_predict_batch(rnn_model_quantized):
+    """Тест batch предсказания квантизированной RNN модели."""
+    texts = ["нормальный текст", "токсичный комментарий"]
+    results = rnn_model_quantized.predict_batch(texts)
+    assert len(results) == 2
+    for r in results:
+        assert "toxicity_score" in r
+        assert 0.0 <= r["toxicity_score"] <= 1.0
+
+
+def test_rnn_model_quantized_get_model_info(rnn_model_quantized):
+    """Тест get_model_info для квантизированной RNN модели."""
+    info = rnn_model_quantized.get_model_info()
+    assert info["is_loaded"] is True
+    assert "is_quantized" in info
+    assert info["is_quantized"] is True
+    assert "quantization_dtype" in info
+    assert "quantization_method" in info
+    assert "model_params" in info
+
+
+def test_rnn_model_quantized_info_has_quantization_details(rnn_model_quantized):
+    """Тест что информация о модели содержит детали квантизации."""
+    info = rnn_model_quantized.get_model_info()
+    assert "is_quantized" in info
+    if info["is_quantized"]:
+        assert "quantization_dtype" in info
+        assert "quantization_method" in info
+        # Проверяем, что embeddings_quantized_fp16 присутствует, если была применена квантизация эмбеддингов
+        model_params = info.get("model_params", {})
+        if "embeddings_quantized_fp16" in model_params:
+            assert isinstance(model_params["embeddings_quantized_fp16"], bool)
+
+
+# --- Тесты для оригинальной PyTorch RNN модели ---
+
+
+def test_rnn_model_pytorch_get_model_info(rnn_model_pytorch):
+    """Тест get_model_info для оригинальной PyTorch RNN модели."""
+    info = rnn_model_pytorch.get_model_info()
+    assert info["is_loaded"] is True
+    # Оригинальная модель не должна быть квантизирована
+    if "is_quantized" in info:
+        assert info["is_quantized"] is False
+
+
+# --- Сравнение оригинальной и квантизированной RNN моделей ---
+
+
+def test_rnn_pytorch_vs_quantized_similar_output(rnn_model_pytorch, rnn_model_quantized):
+    """
+    Тест: предсказания оригинальной и квантизированной RNN моделей близки (в пределах допуска).
+    Квантизация может незначительно изменить выходы.
+    """
+    test_texts = [
+        "это нормальный комментарий",
+        "спасибо за помощь",
+        "очень полезная информация",
+    ]
+    tolerance = 0.1  # допуск на разницу из-за квантизации (больше чем для ONNX, т.к. динамическая квантизация менее точна)
+
+    for text in test_texts:
+        pt_result = rnn_model_pytorch.predict(text)
+        quantized_result = rnn_model_quantized.predict(text)
+        pt_score = pt_result["toxicity_score"]
+        quantized_score = quantized_result["toxicity_score"]
+        assert abs(pt_score - quantized_score) <= tolerance, (
+            f"Текст: {text!r}, PyTorch: {pt_score:.4f}, Квантизированная: {quantized_score:.4f}"
+        )
+
+
+def test_rnn_pytorch_vs_quantized_batch_similar_output(rnn_model_pytorch, rnn_model_quantized):
+    """Тест: batch предсказания оригинальной и квантизированной RNN моделей близки."""
+    texts = ["текст один", "текст два", "текст три"]
+    pt_results = rnn_model_pytorch.predict_batch(texts)
+    quantized_results = rnn_model_quantized.predict_batch(texts)
+    tolerance = 0.1
+
+    for pt_r, quantized_r in zip(pt_results, quantized_results):
+        assert abs(pt_r["toxicity_score"] - quantized_r["toxicity_score"]) <= tolerance, (
+            f"PyTorch: {pt_r['toxicity_score']:.4f}, Квантизированная: {quantized_r['toxicity_score']:.4f}"
+        )
+
+
+def test_rnn_model_quantized_loads_correctly(temp_model_files_bpe_quantized):
+    """Тест что квантизированная модель загружается корректно."""
+    model_path, tokenizer_path = temp_model_files_bpe_quantized
+    model = RNNModel()
+    model.load(model_path=model_path, tokenizer_path=tokenizer_path)
+    
+    assert model.is_loaded
+    assert model.model is not None
+    assert model.tokenizer is not None
+    
+    # Проверяем, что модель действительно квантизирована
+    info = model.get_model_info()
+    assert info.get("is_quantized", False) is True
 
 
 
