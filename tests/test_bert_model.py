@@ -1,27 +1,83 @@
-"""Тесты для BERT модели"""
+"""Тесты для BERT модели (PyTorch и квантизованная ONNX)"""
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from app.models.bert_model import BERTModel
+from app.models.bert_model import BERTModel, _ONNX_FILES
+
+
+def _has_pytorch_model(path: Path) -> bool:
+    """Проверяет наличие PyTorch модели (config.json + pytorch_model.bin или model.safetensors)."""
+    if not path.exists() or not (path / "config.json").exists():
+        return False
+    return (path / "pytorch_model.bin").exists() or (path / "model.safetensors").exists()
+
+
+def _has_onnx_model(path: Path) -> bool:
+    """Проверяет наличие ONNX модели."""
+    if not path.exists():
+        return False
+    return any((path / fname).exists() for fname in _ONNX_FILES)
 
 
 @pytest.fixture
 def bert_model():
-    """Загружает реальную BERT модель из models/bert/ для тестирования"""
+    """Загружает BERT модель из models/bert/ (PyTorch при наличии, иначе автоопределение)."""
     model_path = Path("models/bert")
-    
-    # Проверяем существование модели
     if not model_path.exists():
         pytest.skip(f"Модель не найдена в {model_path}. Обучите модель перед запуском тестов.")
-    
-    # Проверяем наличие необходимых файлов
     if not (model_path / "config.json").exists():
         pytest.skip(f"Модель в {model_path} неполная. Обучите модель перед запуском тестов.")
-    
-    model = BERTModel(model_path=str(model_path))
+    # Явно PyTorch, если есть веса
+    use_onnx = False if _has_pytorch_model(model_path) else None
+    model = BERTModel(model_path=str(model_path), use_onnx=use_onnx)
     model.load()
+    yield model
+
+
+@pytest.fixture
+def bert_model_pytorch():
+    """Загружает PyTorch BERT модель (use_onnx=False)."""
+    model_path = Path("models/bert")
+    if not _has_pytorch_model(model_path):
+        pytest.skip(f"PyTorch модель не найдена в {model_path}. Обучите модель перед запуском тестов.")
+    model = BERTModel(model_path=str(model_path), use_onnx=False)
+    model.load()
+    yield model
+
+
+@pytest.fixture
+def bert_model_onnx():
+    """Загружает квантизованную ONNX BERT модель."""
+    # Проверяем наличие onnxruntime
+    try:
+        import onnxruntime
+    except ImportError:
+        pytest.skip(
+            "onnxruntime не установлен. Установите: pip install onnxruntime\n"
+            "Или: pip install optimum[onnxruntime]"
+        )
     
+    # Проверяем наличие optimum.onnxruntime
+    try:
+        from optimum.onnxruntime import ORTModelForSequenceClassification
+    except ImportError:
+        pytest.skip(
+            "optimum[onnxruntime] не установлен. Установите: pip install optimum[onnxruntime]"
+        )
+    
+    onnx_path = None
+    for path in (Path("models/bert_onnx"), Path("models/bert_onnx_cpu"), Path("models/bert")):
+        if _has_onnx_model(path):
+            onnx_path = path
+            break
+    if onnx_path is None:
+        pytest.skip(
+            "ONNX модель не найдена. Запустите квантизацию: "
+            "python scripts/quantize_bert_onnx.py models/bert -o models/bert_onnx --device cpu"
+        )
+    model = BERTModel(model_path=str(onnx_path), use_onnx=True)
+    model.load()
     yield model
 
 
@@ -217,12 +273,13 @@ def test_bert_model_get_model_info_not_loaded():
     """Тест получения информации о модели без загрузки"""
     model = BERTModel()
     info = model.get_model_info()
-    
-    assert info['name'] == 'bert'
-    assert info['type'] == 'bert'
-    assert info['is_loaded'] is False
-    assert info['version'] == '1.0'
-    assert 'description' in info
+
+    assert info["name"] == "bert"
+    assert info["type"] == "bert"
+    assert info["is_loaded"] is False
+    assert info["version"] == "1.0"
+    assert "description" in info
+    assert info["is_onnx"] is False
 
 
 def test_bert_model_get_model_info_loaded(bert_model):
@@ -293,7 +350,124 @@ def test_bert_model_max_length_setting():
     """Тест настройки max_length"""
     model = BERTModel(max_length=256)
     assert model.max_length == 256
-    
+
     model2 = BERTModel()
     assert model2.max_length == 512  # Значение по умолчанию
+
+
+# --- Тесты для use_onnx параметра ---
+
+
+def test_bert_model_use_onnx_initialization():
+    """Тест инициализации с use_onnx."""
+    model = BERTModel(use_onnx=None)
+    assert model.use_onnx is None
+    assert model._is_onnx is False
+
+    model2 = BERTModel(use_onnx=False)
+    assert model2.use_onnx is False
+
+    model3 = BERTModel(use_onnx=True)
+    assert model3.use_onnx is True
+
+
+def test_bert_model_use_onnx_true_raises_if_no_onnx():
+    """Тест: use_onnx=True без ONNX файлов вызывает FileNotFoundError."""
+    # Создаём временную директорию без ONNX
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Пустая директория или только config.json
+        (Path(tmpdir) / "config.json").write_text("{}")
+        model = BERTModel(model_path=tmpdir, use_onnx=True)
+        with pytest.raises(FileNotFoundError, match="ONNX модель не найдена"):
+            model.load()
+
+
+# --- Тесты для ONNX модели ---
+
+
+def test_bert_model_onnx_predict(bert_model_onnx):
+    """Тест предсказания ONNX модели."""
+    result = bert_model_onnx.predict("это тестовый комментарий")
+    assert isinstance(result, dict)
+    assert "is_toxic" in result
+    assert "toxicity_score" in result
+    assert "toxicity_types" in result
+    assert isinstance(result["toxicity_score"], float)
+    assert 0.0 <= result["toxicity_score"] <= 1.0
+
+
+def test_bert_model_onnx_predict_batch(bert_model_onnx):
+    """Тест batch предсказания ONNX модели."""
+    texts = ["нормальный текст", "токсичный комментарий"]
+    results = bert_model_onnx.predict_batch(texts)
+    assert len(results) == 2
+    for r in results:
+        assert "toxicity_score" in r
+        assert 0.0 <= r["toxicity_score"] <= 1.0
+
+
+def test_bert_model_onnx_is_onnx_flag(bert_model_onnx):
+    """Тест флага _is_onnx у ONNX модели."""
+    assert bert_model_onnx._is_onnx is True
+
+
+def test_bert_model_onnx_get_model_info(bert_model_onnx):
+    """Тест get_model_info для ONNX модели."""
+    info = bert_model_onnx.get_model_info()
+    assert info["is_loaded"] is True
+    assert info["is_onnx"] is True
+    assert "optimal_threshold" in info
+    assert "device" in info
+
+
+# --- Тесты для PyTorch модели ---
+
+
+def test_bert_model_pytorch_is_onnx_flag(bert_model_pytorch):
+    """Тест флага _is_onnx у PyTorch модели."""
+    assert bert_model_pytorch._is_onnx is False
+
+
+def test_bert_model_pytorch_get_model_info(bert_model_pytorch):
+    """Тест get_model_info для PyTorch модели."""
+    info = bert_model_pytorch.get_model_info()
+    assert info["is_loaded"] is True
+    assert info["is_onnx"] is False
+
+
+# --- Сравнение PyTorch и ONNX ---
+
+
+def test_bert_pytorch_vs_onnx_similar_output(bert_model_pytorch, bert_model_onnx):
+    """
+    Тест: предсказания PyTorch и ONNX моделей близки (в пределах допуска).
+    Квантизация может незначительно изменить выходы.
+    """
+    test_texts = [
+        "это нормальный комментарий",
+        "спасибо за помощь",
+        "очень полезная информация",
+    ]
+    tolerance = 0.5  # допуск на разницу из-за квантизации
+
+    for text in test_texts:
+        pt_result = bert_model_pytorch.predict(text)
+        onnx_result = bert_model_onnx.predict(text)
+        pt_score = pt_result["toxicity_score"]
+        onnx_score = onnx_result["toxicity_score"]
+        assert abs(pt_score - onnx_score) <= tolerance, (
+            f"Текст: {text!r}, PyTorch: {pt_score:.4f}, ONNX: {onnx_score:.4f}"
+        )
+
+
+def test_bert_pytorch_vs_onnx_batch_similar_output(bert_model_pytorch, bert_model_onnx):
+    """Тест: batch предсказания PyTorch и ONNX близки."""
+    texts = ["текст один", "текст два", "текст три"]
+    pt_results = bert_model_pytorch.predict_batch(texts)
+    onnx_results = bert_model_onnx.predict_batch(texts)
+    tolerance = 0.05
+
+    for pt_r, onnx_r in zip(pt_results, onnx_results):
+        assert abs(pt_r["toxicity_score"] - onnx_r["toxicity_score"]) <= tolerance
 

@@ -30,7 +30,7 @@ class BaseToxicityModel(ABC):
     def ensure_loaded(self) -> None:
         """Raise if model is not loaded yet."""
         if not self.is_loaded:
-            raise RuntimeError("Model is not loaded. Call load() first.")
+            raise RuntimeError("Модель не загружена. Вызовите load() перед использованием.")
 
     @staticmethod
     def empty_result() -> Dict[str, Any]:

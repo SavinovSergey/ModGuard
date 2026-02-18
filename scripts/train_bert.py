@@ -44,6 +44,13 @@ from scripts.training.common import (
 )
 from scripts.training.data import load_train_val_data, prepare_texts_neural
 
+# Опциональный импорт для ONNX квантизации
+try:
+    from scripts.quantize_bert_onnx import quantize_bert_to_onnx
+    _HAS_QUANTIZE_ONNX = True
+except ImportError:
+    _HAS_QUANTIZE_ONNX = False
+
 
 class ToxicityDataset(Dataset):
     """Dataset для токсичности комментариев"""
@@ -657,6 +664,24 @@ def main():
     add_common_random_state_arg(parser)
     add_common_loss_args(parser)
     parser.set_defaults(focal_auto_alpha=True)
+    parser.add_argument(
+        '--quantize-onnx',
+        action='store_true',
+        help='После обучения экспортировать модель в ONNX с квантизацией',
+    )
+    parser.add_argument(
+        '--quantize-device',
+        type=str,
+        choices=['cpu', 'gpu'],
+        default='cpu',
+        help='Устройство для ONNX квантизации: cpu (AVX2) или gpu (TensorRT)',
+    )
+    parser.add_argument(
+        '--quantize-output-dir',
+        type=str,
+        default=None,
+        help='Директория для ONNX модели (по умолчанию: <output_dir>_onnx_<device>)',
+    )
     
     args = parser.parse_args()
     
@@ -710,6 +735,21 @@ def main():
     
     # Сохранение параметров
     trainer.save_params(str(output_dir / 'params.json'))
+
+    # Опциональная ONNX квантизация
+    if args.quantize_onnx:
+        if not _HAS_QUANTIZE_ONNX:
+            print("\nВнимание: optimum[onnxruntime] не установлен. Пропуск квантизации.")
+            print("Установите: pip install optimum[onnxruntime]")
+        else:
+            quantize_dir = args.quantize_output_dir or f"{output_dir}_onnx_{args.quantize_device}"
+            print(f"\nONNX квантизация ({args.quantize_device}) -> {quantize_dir}")
+            quantize_bert_to_onnx(
+                str(output_dir),
+                quantize_dir,
+                device=args.quantize_device,
+                calibration_texts=X_train[:200] if args.quantize_device == 'gpu' else None,
+            )
     
     print("\nДообучение завершено!")
 
