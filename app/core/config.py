@@ -14,13 +14,13 @@ class Settings(BaseSettings):
     )
     
     # Модель
-    model_type: str = "fasttext"  # regex, tfidf, fasttext, rnn, rubert
+    model_type: str = "bert"  # regex, tfidf, fasttext, rnn, bert
     model_path: Optional[str] = None
-    fallback_chain: List[str] = ["rubert", "rnn", "tfidf", "regex"]
+    fallback_chain: List[str] = ["bert", "rnn", "tfidf", "regex"]
     
     # Таймауты для моделей (в секундах)
     model_timeouts: dict = {
-        "rubert": 0.1,
+        "bert": 0.1,
         "rnn": 0.15,
         "tfidf": 0.05,
         "regex": 0.01

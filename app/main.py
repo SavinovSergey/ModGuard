@@ -79,13 +79,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not register FastText model: {e}")
     
-    # RNN модель (если обучена)
+    # RNN модель (если обучена); поддержка квантизованной версии (model_quantized.pt)
     try:
         from app.models.rnn_model import RNNModel
         
         rnn_model = RNNModel()
-        model_path = Path("models/rnn/model.pt")
-        tokenizer_path = Path("models/rnn/tokenizer.json")
+        rnn_dir = Path("models/rnn")
+        tokenizer_path = rnn_dir / "tokenizer.json"
+        model_path = rnn_dir / "model_quantized.pt"
+        if not model_path.exists():
+            model_path = rnn_dir / "model.pt"
         
         if model_path.exists() and tokenizer_path.exists():
             rnn_model.load(
@@ -93,13 +96,40 @@ async def lifespan(app: FastAPI):
                 tokenizer_path=str(tokenizer_path)
             )
             model_manager.register_model("rnn", rnn_model)
-            logger.info("RNN model registered and loaded")
+            logger.info(f"RNN model registered and loaded ({model_path.name})")
         else:
             logger.info("RNN model files not found, skipping registration")
     except Exception as e:
         logger.warning(f"Could not register RNN model: {e}")
     
-    # Загрузка модели по умолчанию
+    # BERT модель (если обучена); поддержка PyTorch и квантизованной ONNX (model_quantized.onnx / model.onnx)
+    try:
+        from app.models.bert_model import BERTModel
+        
+        bert_model = BERTModel()
+        # Пробуем директории: models/bert (может содержать ONNX), models/bert_onnx, models/bert_onnx_cpu
+        bert_loaded = False
+        for bert_dir in (Path("models/bert"), Path("models/bert_onnx"), Path("models/bert_onnx_cpu")):
+            if not bert_dir.is_dir():
+                continue
+            # BERTModel.load() автоопределяет ONNX по наличию model_quantized.onnx / model.onnx
+            try:
+                bert_model.load(model_path=str(bert_dir))
+                model_manager.register_model("bert", bert_model)
+                logger.info(f"BERT model registered and loaded from {bert_dir}")
+                bert_loaded = True
+                break
+            except Exception as e_inner:
+                logger.debug(f"BERT load from {bert_dir} failed: {e_inner}")
+                continue
+        if not bert_loaded:
+            logger.info("BERT model directory not found or load failed, skipping registration")
+    except ImportError as e:
+        logger.warning(f"Could not import BERT model: {e}")
+    except Exception as e:
+        logger.warning(f"Could not register BERT model: {e}")
+    
+    # Загрузка модели по умолчанию (rubert — алиас для bert)
     try:
         model_manager.set_current_model(settings.model_type)
         logger.info(f"Loaded default model: {settings.model_type}")

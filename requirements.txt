@@ -6,12 +6,12 @@ pydantic-settings>=2.1.0
 httpx==0.28.1
 
 # ML и обработка данных
-# numpy 2.0.0 требует обновления pandas и scikit-learn
-numpy==1.26.1
-pandas>=2.2.0, <3.0.0  # Обновлено для совместимости с numpy 2.0
+# Для Python 3.10 используем numpy < 2.0 для совместимости с FastText
+numpy>=1.26.1,<2.0.0
+pandas>=1.5.0,<3.0.0
 pyarrow
-scikit-learn>=1.4.0  # Обновлено для совместимости с numpy 2.0
-optuna>=3.4.0  # Для оптимизации гиперпараметров
+scikit-learn>=1.0.0
+optuna>=3.0.0  # Для оптимизации гиперпараметров
 
 # NLP библиотеки
 pymorphy3>=0.2.0
@@ -26,10 +26,25 @@ pytest>=7.4.3
 pytest-cov>=4.1.0
 pytest-asyncio>=0.21.0  # Для тестирования async endpoints
 
-# Для будущих моделей (пока закомментировано)
-# torch>=2.1.0  # Поддерживает Python 3.12
-# transformers>=4.35.0  # Совместим с torch 2.1+
+# PyTorch для RNN модели
+torch>=1.13.0  # Поддерживает Python 3.10
+transformers>=4.20.0  # Совместим с Python 3.10
+
+# ONNX квантизация BERT (опционально)
+# CPU: optimum[onnxruntime] (по умолчанию)
+# GPU/TensorRT: pip install optimum[onnxruntime-gpu]
+optimum[onnxruntime]>=1.14.0
+onnxruntime>=1.15.0  # Явная зависимость для ONNX Runtime
+tokenizers>=0.13.0  # Для BPE токенизатора
+sentencepiece>=0.1.95  # Требуется для MarianTokenizer (модели перевода)
+sacremoses>=0.1.1
+bitsandbytes>=0.41.0  # Опционально: для 8-bit квантизации моделей перевода (ускоряет и экономит память)
+accelerate>=1.1.0
 
 # FastText для embeddings
 fasttext>=0.9.2
+
+# Для аугментации данных (перевод)
+deep-translator>=1.11.4  # Бесплатный Google Translate (по умолчанию, без конфликтов зависимостей)
+requests>=2.31.0  # Для работы с Yandex Translate API (опционально)
 

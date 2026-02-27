@@ -1,0 +1,73 @@
+# Dockerfile с поддержкой GPU для моделей RNN и transformers
+# Использует CUDA-enabled PyTorch
+
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+# Установка Python 3.10
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
+    curl \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Создание символической ссылки для python
+RUN ln -s /usr/bin/python3.10 /usr/bin/python && \
+    ln -s /usr/bin/python3.10 /usr/bin/python3
+
+# Установка рабочей директории
+WORKDIR /app
+
+# Копирование requirements.txt
+COPY requirements.txt .
+
+# Установка pip и Python зависимостей
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 && \
+    pip3 install --no-cache-dir -r requirements.txt
+
+# Создание пользователя для запуска приложения
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app && \
+    chown -R appuser:appuser /app
+
+# Копирование кода приложения
+COPY app/ ./app/
+COPY run.py .
+
+# Создание директории для моделей
+RUN mkdir -p /app/models && \
+    chown -R appuser:appuser /app
+
+# Переключение на пользователя appuser
+USER appuser
+
+# Переменные окружения
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MODEL_TYPE=regex \
+    LOG_LEVEL=INFO \
+    API_PREFIX=/api/v1 \
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    CUDA_VISIBLE_DEVICES=0
+
+# Открытие порта
+EXPOSE 8000
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+
+# Команда запуска
+CMD ["python", "run.py"]
+
+
+
+
+
+
+
+
