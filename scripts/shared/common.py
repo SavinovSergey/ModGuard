@@ -76,6 +76,51 @@ def find_optimal_threshold(
     return optimal_threshold, float(precision[best_idx]), float(recall[best_idx])
 
 
+def find_threshold_max_f1_min_precision(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    min_precision: float = 0.9,
+) -> tuple[float, float, float, float]:
+    """
+    Find threshold that maximizes F1 subject to precision >= min_precision.
+
+    Returns:
+        (optimal_threshold, precision_at_threshold, recall_at_threshold, f1_at_threshold)
+    """
+    precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
+    precision = precision[:-1]
+    recall = recall[:-1]
+
+    # F1 at each threshold (avoid div by zero)
+    f1 = np.zeros_like(precision)
+    mask = (precision + recall) > 0
+    f1[mask] = 2 * precision[mask] * recall[mask] / (precision[mask] + recall[mask])
+
+    valid_indices = np.where(precision >= min_precision)[0]
+
+    if len(valid_indices) > 0:
+        best_idx = valid_indices[np.argmax(f1[valid_indices])]
+    else:
+        best_idx = int(np.argmax(f1))
+        print(
+            f"  Warning: ни один порог не дал precision >= {min_precision:.2f}, выбран порог с макс. F1"
+        )
+
+    if len(thresholds) == 0:
+        opt_threshold = 0.5
+    elif best_idx < len(thresholds):
+        opt_threshold = float(thresholds[best_idx])
+    else:
+        opt_threshold = float(thresholds[-1])
+
+    return (
+        opt_threshold,
+        float(precision[best_idx]),
+        float(recall[best_idx]),
+        float(f1[best_idx]),
+    )
+
+
 def compute_auto_alpha(y_train: np.ndarray) -> float:
     """
     Estimate alpha for focal loss.

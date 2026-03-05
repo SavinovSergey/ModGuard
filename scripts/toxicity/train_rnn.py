@@ -15,29 +15,30 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score, average_precision_score
 from tqdm import tqdm
 
-# Добавляем путь к app для импорта
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Корень проекта (скрипт в scripts/toxicity/)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 from app.models.rnn_network import RNNClassifier
 from app.models.rnn_dataset import ToxicityDataset, collate_fn
 from app.models.rnn_tokenizers import create_tokenizer, BPETokenizer, RuBERTTokenizer
-from scripts.training.cli import (
+from scripts.shared.cli import (
     add_common_data_args,
     add_common_loss_args,
     add_common_output_arg,
     add_common_random_state_arg,
 )
-from scripts.training.common import (
+from scripts.shared.common import (
     BinaryFocalLoss,
     compute_auto_alpha,
     convert_to_json_serializable,
     find_optimal_threshold,
 )
-from scripts.training.data import load_train_val_data, prepare_texts_neural
+from scripts.shared.data import load_train_val_data, prepare_texts_neural
 
 # Опциональный импорт для квантизации RNN
 try:
-    from scripts.quantize_rnn import quantize_rnn_model
+    from scripts.toxicity.quantize_rnn import quantize_rnn_model
     _HAS_QUANTIZE_RNN = True
 except ImportError:
     _HAS_QUANTIZE_RNN = False

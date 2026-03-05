@@ -7,10 +7,10 @@
 
 Использование:
   1. Отдельный скрипт:
-     python scripts/quantize_rnn.py models/rnn/model.pt models/rnn/tokenizer.json -o models/rnn_quantized
+     python scripts/toxicity/quantize_rnn.py models/rnn/model.pt models/rnn/tokenizer.json -o models/rnn_quantized
 
   2. Импорт после обучения:
-     from scripts.quantize_rnn import quantize_rnn_model
+     from scripts.toxicity.quantize_rnn import quantize_rnn_model
      quantize_rnn_model("models/rnn/model.pt", "models/rnn/tokenizer.json", "models/rnn_quantized")
 """
 from __future__ import annotations
@@ -38,8 +38,9 @@ import torch.nn as nn
 _DEFAULT_QUANTIZE_DTYPE = torch.qint8
 
 import sys
-# Добавляем путь к app для импорта
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Корень проекта (скрипт в scripts/toxicity/)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 from app.models.rnn_network import RNNClassifier
 from app.models.rnn_tokenizers import create_tokenizer

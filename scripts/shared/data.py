@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from app.preprocessing.text_processor import TextProcessor
+from app.preprocessing.spam_processor import SpamTextProcessor
 
 
 def load_train_val_data(
@@ -80,4 +81,35 @@ def prepare_texts_neural(
     print(f"Prepared {len(x)} examples")
     print(f"Class distribution: {np.bincount(y.astype(int))}")
     print(f"Unique label values: {np.unique(y)}")
+    return x, y
+
+
+def prepare_texts_spam(
+    df: pd.DataFrame,
+    text_col: str = "text",
+    label_col: str = "label",
+    return_raw: bool = False,
+):
+    """Preprocess data for spam model: SpamTextProcessor (no lowercasing, keep URLs/emails).
+    If return_raw=True, returns (x_processed, y, raw_texts) for feature extraction from raw text."""
+    print("Preprocessing text (spam pipeline)...")
+    processor = SpamTextProcessor()
+    frame = df.copy()
+    frame["processed_text"] = frame[text_col].astype(str).apply(processor.process)
+    frame = frame[frame["processed_text"].str.len() > 0]
+    x = frame["processed_text"].values
+    y = frame[label_col].values
+    # Ensure int 0/1 for sklearn (label may be bool)
+    y = np.asarray(y, dtype=np.int64)
+    if y.max() == 1 and y.min() == 0:
+        pass
+    elif np.issubdtype(y.dtype, np.bool_):
+        y = y.astype(np.int64)
+    else:
+        y = (y != 0).astype(np.int64)
+    print(f"Prepared {len(x)} examples")
+    print(f"Class distribution: {np.bincount(y)}")
+    if return_raw:
+        raw_texts = frame[text_col].astype(str).values
+        return x, y, raw_texts
     return x, y

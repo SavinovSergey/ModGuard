@@ -27,26 +27,27 @@ from transformers import (
 )
 from tqdm import tqdm
 
-# Добавляем путь к app для импорта
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Корень проекта (скрипт в scripts/toxicity/)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 
-from scripts.training.cli import (
+from scripts.shared.cli import (
     add_common_data_args,
     add_common_loss_args,
     add_common_output_arg,
     add_common_random_state_arg,
 )
-from scripts.training.common import (
+from scripts.shared.common import (
     BinaryFocalLoss,
     compute_auto_alpha,
     convert_to_json_serializable,
     find_optimal_threshold,
 )
-from scripts.training.data import load_train_val_data, prepare_texts_neural
+from scripts.shared.data import load_train_val_data, prepare_texts_neural
 
 # Опциональный импорт для ONNX квантизации
 try:
-    from scripts.quantize_bert_onnx import quantize_bert_to_onnx
+    from scripts.toxicity.quantize_bert_onnx import quantize_bert_to_onnx
     _HAS_QUANTIZE_ONNX = True
 except ImportError:
     _HAS_QUANTIZE_ONNX = False

@@ -7,11 +7,11 @@
 
 Использование:
   1. Отдельный скрипт:
-     python scripts/quantize_bert_onnx.py models/bert -o models/bert_onnx --device cpu
-     python scripts/quantize_bert_onnx.py models/bert -o models/bert_onnx_gpu --device gpu
+     python scripts/toxicity/quantize_bert_onnx.py models/bert -o models/bert_onnx --device cpu
+     python scripts/toxicity/quantize_bert_onnx.py models/bert -o models/bert_onnx_gpu --device gpu
 
   2. Импорт после обучения:
-     from scripts.quantize_bert_onnx import quantize_bert_to_onnx
+     from scripts.toxicity.quantize_bert_onnx import quantize_bert_to_onnx
      quantize_bert_to_onnx("models/bert", "models/bert_onnx", device="cpu")
 """
 from __future__ import annotations
@@ -20,8 +20,8 @@ import argparse
 from pathlib import Path
 from typing import List, Optional, Union
 
-# Добавляем путь к корню проекта для импортов
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Корень проекта (скрипт в scripts/toxicity/)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(_PROJECT_ROOT))
 
