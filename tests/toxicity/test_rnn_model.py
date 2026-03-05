@@ -129,7 +129,7 @@ def temp_model_files_bpe_quantized(temp_model_files_bpe):
     
     # Квантизируем модель
     try:
-        from scripts.quantize_rnn import quantize_rnn_model
+        from scripts.toxicity.quantize_rnn import quantize_rnn_model
     except ImportError:
         pytest.skip("Скрипт квантизации не найден")
     

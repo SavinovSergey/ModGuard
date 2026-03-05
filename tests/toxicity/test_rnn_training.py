@@ -8,7 +8,7 @@ import numpy as np
 from app.models.rnn_dataset import ToxicityDataset, collate_fn
 from app.models.rnn_tokenizers import BPETokenizer
 from app.models.rnn_network import RNNClassifier
-from scripts.train_rnn import RNNModelTrainer, BinaryFocalLoss
+from scripts.toxicity.train_rnn import RNNModelTrainer, BinaryFocalLoss
 from app.preprocessing.text_processor import TextProcessor
 
 

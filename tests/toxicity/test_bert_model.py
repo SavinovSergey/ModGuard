@@ -74,7 +74,7 @@ def bert_model_onnx():
     if onnx_path is None:
         pytest.skip(
             "ONNX модель не найдена. Запустите квантизацию: "
-            "python scripts/quantize_bert_onnx.py models/bert -o models/bert_onnx --device cpu"
+            "python scripts/toxicity/quantize_bert_onnx.py models/bert -o models/bert_onnx --device cpu"
         )
     model = BERTModel(model_path=str(onnx_path), use_onnx=True)
     model.load()
@@ -131,6 +131,28 @@ def test_bert_model_load_with_params(bert_model):
     assert bert_model.is_loaded
     assert bert_model.optimal_threshold is not None
     assert bert_model.max_length is not None
+
+
+def test_bert_backend_pytorch_unchanged_after_load_and_predict(bert_model_pytorch):
+    """PyTorch-версия BERT: бэкенд остаётся PyTorch после load и после predict/predict_batch."""
+    model = bert_model_pytorch
+    assert getattr(model, "_is_onnx", True) is False, "После загрузки с use_onnx=False должен быть PyTorch"
+    model.predict("проверка бэкенда")
+    assert getattr(model, "_is_onnx", True) is False, "После predict бэкенд не должен меняться"
+    model.predict_batch(["ещё один текст", "и второй"])
+    assert getattr(model, "_is_onnx", True) is False, "После predict_batch бэкенд не должен меняться"
+    assert model.get_model_info().get("is_onnx") is False
+
+
+def test_bert_backend_onnx_unchanged_after_load_and_predict(bert_model_onnx):
+    """ONNX-версия BERT: бэкенд остаётся ONNX после load и после predict/predict_batch."""
+    model = bert_model_onnx
+    assert getattr(model, "_is_onnx", False) is True, "После загрузки с use_onnx=True должен быть ONNX"
+    model.predict("проверка бэкенда")
+    assert getattr(model, "_is_onnx", False) is True, "После predict бэкенд не должен меняться"
+    model.predict_batch(["ещё один текст", "и второй"])
+    assert getattr(model, "_is_onnx", False) is True, "После predict_batch бэкенд не должен меняться"
+    assert model.get_model_info().get("is_onnx") is True
 
 
 def test_bert_model_predict_not_loaded():
