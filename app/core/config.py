@@ -45,6 +45,23 @@ class Settings(BaseSettings):
     port: int = 8000
     reload: bool = False
 
+    # Redis (при None кэш и task_store работают in-memory / no-op)
+    redis_url: Optional[str] = None
+    cache_ttl_seconds: int = 3600
+    cache_ttl_regex_seconds: int = 300
+    task_result_ttl_seconds: int = 86400
+
+    # Postgres (при None задачи хранятся в Redis/in-memory)
+    database_url: Optional[str] = None
+
+    # RabbitMQ (при None batch-async обрабатывается через BackgroundTasks, без очереди)
+    rabbitmq_url: Optional[str] = None
+    rabbitmq_queue_requests: str = "moderation.requests"
+    rabbitmq_queue_results: str = "moderation.results"
+
+    # Telegram (для listener и actions)
+    telegram_bot_token: Optional[str] = None
+
 
 # Глобальный экземпляр настроек
 settings = Settings()

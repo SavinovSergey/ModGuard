@@ -170,6 +170,8 @@ class ModelManager:
                 logger.debug(
                     f"Successfully predicted with {model_name} in {elapsed:.3f}s"
                 )
+                result = dict(result)
+                result["model_used"] = model_name
                 return result
                 
             except Exception as e:

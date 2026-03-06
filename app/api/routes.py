@@ -1,23 +1,56 @@
 """API routes для микросервиса"""
 import logging
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List
+import uuid
+from typing import List, Optional
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 
 from app.api.schemas import (
     ClassifyRequest,
     ClassifyResponse,
     BatchClassifyRequest,
     BatchClassifyResponse,
+    BatchAsyncRequest,
+    BatchAsyncResponse,
+    TaskStatusResponse,
     HealthResponse,
-    StatsResponse
+    StatsResponse,
 )
 from app.services.classification import ClassificationService
 from app.core.config import settings
+from app.core.task_store import TaskStore
+from app.core.db import (
+    create_task_pg,
+    get_task_pg,
+    set_task_processing_pg,
+    set_task_result_pg,
+    set_task_failed_pg,
+)
+from app.core.queue import publish_task_request
 from app import __version__
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _process_batch_async(
+    task_id: str,
+    texts: List[str],
+    preferred_model: Optional[str],
+) -> None:
+    """Фоновая обработка батча: классификация и запись результата в task_store."""
+    from app.main import classification_service, task_store
+    try:
+        task_store.set_task_processing(task_id)
+        results = classification_service.classify_batch(
+            texts,
+            preferred_model=preferred_model,
+        )
+        task_store.set_task_result(task_id, results, status="completed")
+    except Exception as e:
+        logger.exception("Batch async processing failed: %s", e)
+        task_store.set_task_failed(task_id, str(e))
 
 
 def get_classification_service() -> ClassificationService:
@@ -30,6 +63,12 @@ def get_model_manager():
     """Dependency для получения ModelManager"""
     from app.main import model_manager
     return model_manager
+
+
+def get_task_store() -> TaskStore:
+    """Dependency для получения TaskStore"""
+    from app.main import task_store
+    return task_store
 
 
 @router.post("/classify", response_model=ClassifyResponse, tags=["classification"])
@@ -126,6 +165,77 @@ async def health_check(
             version=__version__,
             model_info={"error": str(e)}
         )
+
+
+@router.post(
+    "/classify/batch-async",
+    response_model=BatchAsyncResponse,
+    tags=["classification"],
+)
+async def classify_batch_async(
+    request: BatchAsyncRequest,
+    background_tasks: BackgroundTasks,
+    task_store: TaskStore = Depends(get_task_store),
+):
+    """
+    Принимает батч текстов, возвращает task_id. Результат получать по GET /tasks/{task_id}.
+    При настроенных Postgres и RabbitMQ задача уходит в воркер; иначе обрабатывается в фоне (Phase 1).
+    """
+    if len(request.items) > settings.max_batch_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Batch size exceeds maximum ({settings.max_batch_size})",
+        )
+    task_id = str(uuid.uuid4())
+    items_payload = [{"id": item.id, "text": item.text} for item in request.items]
+    texts = [item.text for item in request.items]
+
+    if settings.database_url and settings.rabbitmq_url:
+        create_task_pg(task_id, items_payload, source=request.source, user_id=request.user_id)
+        publish_task_request(
+            task_id,
+            items_payload,
+            source=request.source,
+            preferred_model=request.preferred_model,
+        )
+        return BatchAsyncResponse(task_id=task_id)
+
+    task_store.create_task(task_id, items_payload)
+    background_tasks.add_task(
+        _process_batch_async,
+        task_id,
+        texts,
+        request.preferred_model,
+    )
+    return BatchAsyncResponse(task_id=task_id)
+
+
+@router.get(
+    "/tasks/{task_id}",
+    response_model=TaskStatusResponse,
+    tags=["classification"],
+)
+async def get_task_status(
+    task_id: str,
+    task_store: TaskStore = Depends(get_task_store),
+):
+    """Получить статус и результат задачи по task_id (polling). Читает из Postgres при наличии, иначе из Redis/in-memory."""
+    data = None
+    if settings.database_url:
+        data = get_task_pg(task_id)
+    if data is None:
+        data = task_store.get_task(task_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Task not found or expired")
+    results = data.get("results")
+    if results is not None:
+        results = [ClassifyResponse(**r) for r in results]
+    return TaskStatusResponse(
+        status=data["status"],
+        results=results,
+        error=data.get("error"),
+        user_id=data.get("user_id"),
+    )
 
 
 @router.get("/stats", response_model=StatsResponse, tags=["monitoring"])

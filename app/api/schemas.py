@@ -33,39 +33,48 @@ class ToxicityType(BaseModel):
 
 
 class ClassifyResponse(BaseModel):
-    """Ответ на запрос классификации"""
+    """Ответ на запрос классификации (токсичность + спам)"""
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "is_toxic": True,
                 "toxicity_score": 0.95,
-                "toxicity_types": {
-                    "ебать": 1.0,
-                    "прочее": 0.8
-                },
-                "model_used": "regex"
+                "toxicity_types": {"ебать": 1.0, "прочее": 0.8},
+                "model_used": "regex",
+                "is_spam": False,
+                "spam_score": 0.0,
             }
         }
     )
-    
+
     is_toxic: bool = Field(..., description="Токсичен ли комментарий")
     toxicity_score: float = Field(
-        ..., 
-        ge=0.0, 
+        ...,
+        ge=0.0,
         le=1.0,
-        description="Вероятность токсичности (0-1)"
+        description="Вероятность токсичности (0-1)",
     )
     toxicity_types: Dict[str, float] = Field(
         default_factory=dict,
-        description="Типы токсичности с вероятностями"
+        description="Типы токсичности с вероятностями",
     )
     model_used: Optional[str] = Field(
         None,
-        description="Модель, использованная для классификации"
+        description="Модель, использованная для классификации",
+    )
+    is_spam: bool = Field(
+        False,
+        description="Является ли сообщение спамом",
+    )
+    spam_score: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Вероятность спама (0-1)",
     )
     error: Optional[str] = Field(
         None,
-        description="Ошибка при классификации (если была)"
+        description="Ошибка при классификации (если была)",
     )
 
 
@@ -143,6 +152,43 @@ class StatsResponse(BaseModel):
         description="Статистика по каждой модели"
     )
     current_model: Optional[str] = Field(None, description="Текущая активная модель")
+
+
+class BatchAsyncItem(BaseModel):
+    """Элемент батча для асинхронной классификации"""
+    id: Optional[str] = Field(None, description="Локальный id для сопоставления результата")
+    text: str = Field(..., description="Текст для модерации")
+
+
+class BatchAsyncRequest(BaseModel):
+    """Запрос на асинхронную batch-классификацию"""
+    items: List[BatchAsyncItem] = Field(
+        ...,
+        min_length=1,
+        description="Список элементов (текст + опционально id)"
+    )
+    source: Optional[str] = Field(None, description="Источник запроса (web, telegram, …)")
+    user_id: Optional[int] = Field(None, description="Идентификатор отправителя (например Telegram user id)")
+    preferred_model: Optional[str] = Field(None, description="Предпочтительная модель")
+
+
+class BatchAsyncResponse(BaseModel):
+    """Ответ на запрос batch-async: только task_id"""
+    task_id: str = Field(..., description="Идентификатор задачи для polling")
+
+
+class TaskStatusResponse(BaseModel):
+    """Статус и результат задачи по task_id"""
+    status: str = Field(
+        ...,
+        description="queued | processing | completed | failed"
+    )
+    results: Optional[List[ClassifyResponse]] = Field(
+        None,
+        description="Результаты (при status=completed), в том же порядке что items"
+    )
+    error: Optional[str] = Field(None, description="Сообщение об ошибке (при status=failed)")
+    user_id: Optional[int] = Field(None, description="Идентификатор отправителя (если передан при создании задачи)")
 
 
 
