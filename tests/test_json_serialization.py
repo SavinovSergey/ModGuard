@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
-from scripts.train_rnn import RNNModelTrainer
+from scripts.toxicity.train_rnn import RNNModelTrainer
 
 def test_convert_to_json_serializable():
     """Тестирование функции _convert_to_json_serializable"""
