@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import fasttext
 
-from app.models.fasttext_model import FastTextModel
+from app.models.toxicity.fasttext_model import FastTextModel
 from app.preprocessing.text_processor import TextProcessor
 
 
@@ -73,9 +73,9 @@ def test_fasttext_model_initialization():
 
 def test_fasttext_model_initialization_with_path():
     """Тест инициализации модели с путем"""
-    model = FastTextModel(model_path="models/fasttext/fasttext_model.bin")
+    model = FastTextModel(model_path="models/toxicity/fasttext/fasttext_model.bin")
     assert model.model_name == "fasttext"
-    assert model.model_path == "models/fasttext/fasttext_model.bin"
+    assert model.model_path == "models/toxicity/fasttext/fasttext_model.bin"
     # is_loaded будет True только если файл существует и загружен
     # В данном случае файл не существует, поэтому False
     assert not model.is_loaded

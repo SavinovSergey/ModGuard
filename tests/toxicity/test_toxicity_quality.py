@@ -5,7 +5,7 @@ from pathlib import Path
 
 from sklearn.metrics import f1_score, precision_score, recall_score
 
-from app.models.bert_model import BERTModel, _ONNX_FILES
+from app.models.toxicity.bert_model import BERTModel, _ONNX_FILES
 from .toxicity_quality_examples import get_toxicity_quality_texts_and_labels
 
 
@@ -29,9 +29,9 @@ MIN_F1_QUALITY_BERT = 0.75
 
 
 def _load_tfidf_model():
-    from app.models.tfidf_model import TfidfModel
-    model_path = Path("models/tfidf/model.pkl")
-    vectorizer_path = Path("models/tfidf/vectorizer.pkl")
+    from app.models.toxicity.tfidf_model import TfidfModel
+    model_path = Path("models/toxicity/tfidf/model.pkl")
+    vectorizer_path = Path("models/toxicity/tfidf/vectorizer.pkl")
     if not model_path.exists() or not vectorizer_path.exists():
         return None
     model = TfidfModel()
@@ -40,8 +40,8 @@ def _load_tfidf_model():
 
 
 def _load_fasttext_model():
-    from app.models.fasttext_model import FastTextModel
-    model_path = Path("models/fasttext/fasttext_model.bin")
+    from app.models.toxicity.fasttext_model import FastTextModel
+    model_path = Path("models/toxicity/fasttext/fasttext_model.bin")
     if not model_path.exists():
         return None
     model = FastTextModel()
@@ -50,8 +50,8 @@ def _load_fasttext_model():
 
 
 def _load_rnn_model():
-    from app.models.rnn_model import RNNModel
-    rnn_dir = Path("models/rnn")
+    from app.models.toxicity.rnn_model import RNNModel
+    rnn_dir = Path("models/toxicity/rnn")
     tokenizer_path = rnn_dir / "tokenizer.json"
     model_path = rnn_dir / "model_quantized.pt"
     if not model_path.exists():
@@ -65,10 +65,10 @@ def _load_rnn_model():
 
 def _load_bert_model():
     """
-    Загружает BERT: при наличии PyTorch в models/bert — только его (без fallback на ONNX при ошибке),
-    иначе ONNX из models/bert или models/bert_onnx. Так бэкенд не переключается от запуска к запуску.
+    Загружает BERT: при наличии PyTorch в models/toxicity/bert — только его (без fallback на ONNX при ошибке),
+    иначе ONNX из models/toxicity/bert/onnx или models/toxicity/bert/onnx_cpu.
     """
-    model_path = Path("models/bert")
+    model_path = Path("models/toxicity/bert")
     if model_path.exists() and (model_path / "config.json").exists():
         if _has_pytorch_bert(model_path):
             # Пробуем только PyTorch; при ошибке не переходим на ONNX, чтобы F1 не прыгал между запусками
@@ -82,7 +82,7 @@ def _load_bert_model():
                 return model
             except Exception:
                 pass
-    for bert_dir in (Path("models/bert_onnx"), Path("models/bert_onnx_cpu")):
+    for bert_dir in (Path("models/toxicity/bert/onnx"), Path("models/toxicity/bert/onnx_cpu")):
         if _has_onnx_bert(bert_dir):
             try:
                 model = BERTModel(model_path=str(bert_dir), use_onnx=True)
@@ -129,7 +129,7 @@ def test_toxicity_quality_tfidf():
     """Качество TF-IDF модели на наборе из toxicity_quality_examples (82 нетоксичных + 30 токсичных)."""
     model = _load_tfidf_model()
     if model is None:
-        pytest.skip("Модель models/tfidf не найдена (запустите обучение)")
+        pytest.skip("Модель models/toxicity/tfidf не найдена (запустите обучение)")
     _run_quality_test(model, "tfidf")
 
 
@@ -137,7 +137,7 @@ def test_toxicity_quality_fasttext():
     """Качество FastText модели на наборе из toxicity_quality_examples."""
     model = _load_fasttext_model()
     if model is None:
-        pytest.skip("Модель models/fasttext не найдена (запустите обучение)")
+        pytest.skip("Модель models/toxicity/fasttext не найдена (запустите обучение)")
     _run_quality_test(model, "fasttext")
 
 
@@ -145,7 +145,7 @@ def test_toxicity_quality_rnn():
     """Качество RNN модели на наборе из toxicity_quality_examples."""
     model = _load_rnn_model()
     if model is None:
-        pytest.skip("Модель models/rnn не найдена (запустите обучение)")
+        pytest.skip("Модель models/toxicity/rnn не найдена (запустите обучение)")
     _run_quality_test(model, "rnn")
 
 
@@ -177,7 +177,7 @@ def test_toxicity_quality_bert():
     _set_torch_deterministic()
     model = _load_bert_model()
     if model is None:
-        pytest.skip("Модель models/bert (или bert_onnx) не найдена (запустите обучение/квантизацию)")
+        pytest.skip("Модель models/toxicity/bert (или onnx) не найдена (запустите обучение/квантизацию)")
     try:
         _run_quality_test(
             model,
@@ -190,5 +190,5 @@ def test_toxicity_quality_bert():
             raise
         pytest.fail(
             f"Тест качества BERT упал с ошибкой: {e}. "
-            "Проверьте, что модель загружена (models/bert или models/bert_onnx) и predict_batch работает."
+            "Проверьте, что модель загружена (models/toxicity/bert или models/toxicity/bert/onnx) и predict_batch работает."
         )

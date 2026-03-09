@@ -7,7 +7,7 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
-from app.models.tfidf_model import TfidfModel
+from app.models.toxicity.tfidf_model import TfidfModel
 from app.preprocessing.text_processor import TextProcessor
 
 
@@ -71,12 +71,12 @@ def test_tfidf_model_initialization():
 def test_tfidf_model_initialization_with_paths():
     """Тест инициализации модели с путями"""
     model = TfidfModel(
-        model_path="models/tfidf/model.pkl",
-        vectorizer_path="models/tfidf/vectorizer.pkl"
+        model_path="models/toxicity/tfidf/model.pkl",
+        vectorizer_path="models/toxicity/tfidf/vectorizer.pkl"
     )
     assert model.model_name == "tfidf"
-    assert model.model_path == "models/tfidf/model.pkl"
-    assert model.vectorizer_path == "models/tfidf/vectorizer.pkl"
+    assert model.model_path == "models/toxicity/tfidf/model.pkl"
+    assert model.vectorizer_path == "models/toxicity/tfidf/vectorizer.pkl"
     # is_loaded будет True только если файлы существуют и загружены
     # В данном случае файлы не существуют, поэтому False
     assert not model.is_loaded

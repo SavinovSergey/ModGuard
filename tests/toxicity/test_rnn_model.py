@@ -7,9 +7,9 @@ import numpy as np
 import json
 import shutil
 
-from app.models.rnn_model import RNNModel
-from app.models.rnn_tokenizers import BPETokenizer
-from app.models.rnn_network import RNNClassifier
+from app.models.toxicity.rnn_model import RNNModel
+from app.models.toxicity.rnn_tokenizers import BPETokenizer
+from app.models.toxicity.rnn_network import RNNClassifier
 from app.preprocessing.text_processor import TextProcessor
 
 
@@ -190,12 +190,12 @@ def test_rnn_model_initialization():
 def test_rnn_model_initialization_with_paths():
     """Тест инициализации модели с путями"""
     model = RNNModel(
-        model_path="models/rnn/model.pt",
-        tokenizer_path="models/rnn/tokenizer.json"
+        model_path="models/toxicity/rnn/model.pt",
+        tokenizer_path="models/toxicity/rnn/tokenizer.json"
     )
     assert model.model_name == "rnn"
-    assert model.model_path == "models/rnn/model.pt"
-    assert model.tokenizer_path == "models/rnn/tokenizer.json"
+    assert model.model_path == "models/toxicity/rnn/model.pt"
+    assert model.tokenizer_path == "models/toxicity/rnn/tokenizer.json"
     assert not model.is_loaded
 
 

@@ -10,8 +10,8 @@ from sklearn.linear_model import LogisticRegression
 from app.main import app
 from app.core.model_manager import ModelManager
 from app.services.classification import ClassificationService
-from app.models.regex_model import RegexModel
-from app.models.tfidf_model import TfidfModel
+from app.models.toxicity.regex_model import RegexModel
+from app.models.toxicity.tfidf_model import TfidfModel
 from app.preprocessing.text_processor import TextProcessor
 
 

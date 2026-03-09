@@ -10,7 +10,7 @@ from app.core.model_manager import ModelManager
 from app.core.cache import NoOpModerationCache
 from app.core.task_store import TaskStore
 from app.services.classification import ClassificationService
-from app.models.regex_model import RegexModel
+from app.models.toxicity.regex_model import RegexModel
 from app.api.routes import get_classification_service, get_model_manager, get_task_store
 
 

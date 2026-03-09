@@ -1,24 +1,47 @@
-"""Тесты асинхронного batch API и кэша."""
+"""Тесты асинхронного batch API и кэша.
+
+Используется отдельное тестовое приложение с пустым lifespan, чтобы не загружать
+PyTorch/модели (избегаем segfault в torch._dynamo при повторных циклах).
+"""
 import time
+from contextlib import asynccontextmanager
+
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.core.config import settings
 from app.core.model_manager import ModelManager
 from app.core.cache import NoOpModerationCache
 from app.core.task_store import TaskStore
 from app.services.classification import ClassificationService
-from app.models.regex_model import RegexModel
+from app.models.toxicity.regex_model import RegexModel
 from app.api.routes import (
+    router,
     get_classification_service,
     get_model_manager,
     get_task_store,
 )
 
 
-@pytest.fixture
+@asynccontextmanager
+async def _noop_lifespan(_app: FastAPI):
+    """Пустой lifespan: без загрузки моделей (для тестов)."""
+    yield
+
+
+def _make_test_app() -> FastAPI:
+    """Приложение только с API-роутером, без полного lifespan из main."""
+    app = FastAPI(lifespan=_noop_lifespan)
+    app.include_router(router, prefix=settings.api_prefix)
+    return app
+
+
+@pytest.fixture(scope="module")
 def client_batch_async():
-    """Клиент с regex, in-memory task_store и без Redis-кэша для тестов batch-async."""
+    """Клиент с regex, in-memory task_store, без Redis и без загрузки PyTorch."""
+    app = _make_test_app()
+
     test_model_manager = ModelManager()
     regex_model = RegexModel()
     regex_model.load()
@@ -31,18 +54,9 @@ def client_batch_async():
     )
     store = TaskStore(None)
 
-    def override_get_classification_service():
-        return test_classification_service
-
-    def override_get_model_manager():
-        return test_model_manager
-
-    def override_get_task_store():
-        return store
-
-    app.dependency_overrides[get_classification_service] = override_get_classification_service
-    app.dependency_overrides[get_model_manager] = override_get_model_manager
-    app.dependency_overrides[get_task_store] = override_get_task_store
+    app.dependency_overrides[get_classification_service] = lambda: test_classification_service
+    app.dependency_overrides[get_model_manager] = lambda: test_model_manager
+    app.dependency_overrides[get_task_store] = lambda: store
 
     with TestClient(app) as client:
         yield client

@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from app.models.bert_model import BERTModel, _ONNX_FILES
+from app.models.toxicity.bert_model import BERTModel, _ONNX_FILES
 
 
 def _has_pytorch_model(path: Path) -> bool:
@@ -20,10 +20,12 @@ def _has_onnx_model(path: Path) -> bool:
     return any((path / fname).exists() for fname in _ONNX_FILES)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def bert_model():
-    """Загружает BERT модель из models/bert/ (PyTorch при наличии, иначе автоопределение)."""
-    model_path = Path("models/bert")
+    """Загружает BERT модель из models/toxicity/bert/ (PyTorch при наличии, иначе автоопределение).
+    scope=module — одна загрузка на файл, чтобы избежать segfault при повторных load/unload torch.
+    """
+    model_path = Path("models/toxicity/bert")
     if not model_path.exists():
         pytest.skip(f"Модель не найдена в {model_path}. Обучите модель перед запуском тестов.")
     if not (model_path / "config.json").exists():
@@ -35,10 +37,12 @@ def bert_model():
     yield model
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def bert_model_pytorch():
-    """Загружает PyTorch BERT модель (use_onnx=False)."""
-    model_path = Path("models/bert")
+    """Загружает PyTorch BERT модель (use_onnx=False).
+    scope=module — одна загрузка на файл (снижает риск segfault в torch._dynamo).
+    """
+    model_path = Path("models/toxicity/bert")
     if not _has_pytorch_model(model_path):
         pytest.skip(f"PyTorch модель не найдена в {model_path}. Обучите модель перед запуском тестов.")
     model = BERTModel(model_path=str(model_path), use_onnx=False)
@@ -46,9 +50,11 @@ def bert_model_pytorch():
     yield model
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def bert_model_onnx():
-    """Загружает квантизованную ONNX BERT модель."""
+    """Загружает квантизованную ONNX BERT модель.
+    scope=module — одна загрузка на файл.
+    """
     # Проверяем наличие onnxruntime
     try:
         import onnxruntime
@@ -67,14 +73,14 @@ def bert_model_onnx():
         )
     
     onnx_path = None
-    for path in (Path("models/bert_onnx"), Path("models/bert_onnx_cpu"), Path("models/bert")):
+    for path in (Path("models/toxicity/bert/onnx"), Path("models/toxicity/bert/onnx_cpu"), Path("models/toxicity/bert")):
         if _has_onnx_model(path):
             onnx_path = path
             break
     if onnx_path is None:
         pytest.skip(
             "ONNX модель не найдена. Запустите квантизацию: "
-            "python scripts/toxicity/quantize_bert_onnx.py models/bert -o models/bert_onnx --device cpu"
+            "python scripts/toxicity/quantize_bert_onnx.py models/toxicity/bert -o models/toxicity/bert/onnx --device cpu"
         )
     model = BERTModel(model_path=str(onnx_path), use_onnx=True)
     model.load()
@@ -94,9 +100,9 @@ def test_bert_model_initialization():
 
 def test_bert_model_initialization_with_path():
     """Тест инициализации модели с путем"""
-    model = BERTModel(model_path="models/bert")
+    model = BERTModel(model_path="models/toxicity/bert")
     assert model.model_name == "bert"
-    assert model.model_path == "models/bert"
+    assert model.model_path == "models/toxicity/bert"
     assert not model.is_loaded
 
 
@@ -317,10 +323,10 @@ def test_bert_model_get_model_info_loaded(bert_model):
 
 def test_bert_model_get_model_info_with_path():
     """Тест получения информации о модели с путем"""
-    model = BERTModel(model_path="models/bert")
+    model = BERTModel(model_path="models/toxicity/bert")
     info = model.get_model_info()
     
-    assert info['name'] == 'models/bert' or info['name'] == 'bert'  # Может быть путь или 'bert' если путь None
+    assert info['name'] == 'models/toxicity/bert' or info['name'] == 'bert'
 
 
 def test_bert_model_get_model_info_with_model_name():
@@ -334,8 +340,8 @@ def test_bert_model_get_model_info_with_model_name():
 
 def test_bert_model_load_from_huggingface():
     """Тест загрузки модели из HuggingFace по имени"""
-    with patch('app.models.bert_model.AutoModelForSequenceClassification') as mock_model_class, \
-         patch('app.models.bert_model.AutoTokenizer') as mock_tokenizer_class:
+    with patch('app.models.toxicity.bert_model.AutoModelForSequenceClassification') as mock_model_class, \
+         patch('app.models.toxicity.bert_model.AutoTokenizer') as mock_tokenizer_class:
         
         import torch
         mock_model = MagicMock()

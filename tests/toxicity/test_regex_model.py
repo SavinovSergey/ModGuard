@@ -1,6 +1,6 @@
 """Тесты для Regex модели"""
 import pytest
-from app.models.regex_model import RegexModel
+from app.models.toxicity.regex_model import RegexModel
 
 
 def test_regex_model_initialization():

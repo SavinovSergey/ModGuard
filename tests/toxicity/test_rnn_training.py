@@ -5,9 +5,9 @@ from pathlib import Path
 import torch
 import numpy as np
 
-from app.models.rnn_dataset import ToxicityDataset, collate_fn
-from app.models.rnn_tokenizers import BPETokenizer
-from app.models.rnn_network import RNNClassifier
+from app.models.toxicity.rnn_dataset import ToxicityDataset, collate_fn
+from app.models.toxicity.rnn_tokenizers import BPETokenizer
+from app.models.toxicity.rnn_network import RNNClassifier
 from scripts.toxicity.train_rnn import RNNModelTrainer, BinaryFocalLoss
 from app.preprocessing.text_processor import TextProcessor
 
