@@ -21,6 +21,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoConfig,
     AutoTokenizer,
+    DataCollatorWithPadding,
     get_linear_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
     get_constant_schedule_with_warmup
@@ -42,8 +43,10 @@ from scripts.shared.common import (
     compute_auto_alpha,
     convert_to_json_serializable,
     find_optimal_threshold,
+    find_threshold_max_f1_min_precision
 )
 from scripts.shared.data import load_train_val_data, prepare_texts_neural
+from scripts.shared.bucketing import get_bucket_boundaries, BucketBatchSampler
 
 # Опциональный импорт для ONNX квантизации
 try:
@@ -72,7 +75,7 @@ class ToxicityDataset(Dataset):
         encoding = self.tokenizer(
             text,
             truncation=True,
-            padding='max_length',
+            padding=False,
             max_length=self.max_length,
             return_tensors='pt'
         )
@@ -270,7 +273,7 @@ class BERTModelTrainer:
         X_val: List[str] = None,
         y_val: np.ndarray = None,
         val_size: float = 0.2,
-        output_dir: str = 'models/bert'
+        output_dir: str = 'models/toxicity/bert'
     ) -> None:
         """
         Обучение модели
@@ -301,20 +304,68 @@ class BERTModelTrainer:
         print(f"\nРазмер обучающей выборки: {len(X_train)}")
         print(f"Размер валидационной выборки: {len(X_val)}")
         
+        length_batch_size = 512
+        # Сортировка валидации по длине (меньше паддинга на инференсе)
+        val_lengths = []
+        for i in range(0, len(X_val), length_batch_size):
+            batch_texts = X_val[i : i + length_batch_size]
+            out = self.tokenizer(
+                batch_texts,
+                truncation=True,
+                max_length=self.max_length,
+                return_length=True,
+            )
+            val_lengths.extend(out['length'])
+        val_sort_idx = np.argsort(val_lengths)
+        X_val = [X_val[j] for j in val_sort_idx]
+        y_val = y_val[val_sort_idx]
+        
         # Создаем датасеты
         train_dataset = ToxicityDataset(X_train, y_train.tolist(), self.tokenizer, max_length=self.max_length)
         val_dataset = ToxicityDataset(X_val, y_val.tolist(), self.tokenizer, max_length=self.max_length)
         
-        # DataLoader-ы
+        # Динамический паддинг до макс. длины в батче (быстрее и меньше лишних паддингов)
+        data_collator = DataCollatorWithPadding(tokenizer=self.tokenizer, return_tensors='pt')
+        
+        def collate_fn(batch):
+            labels = torch.stack([b['labels'] for b in batch])
+            tokenizer_batch = data_collator([
+                {'input_ids': b['input_ids'], 'attention_mask': b['attention_mask']} for b in batch
+            ])
+            return {**tokenizer_batch, 'labels': labels}
+        
+        # Длины для бакетного батчинга (round-robin по бакетам, неполные батчи отдаём)
+        train_lengths = []
+        for i in range(0, len(X_train), length_batch_size):
+            batch_texts = X_train[i : i + length_batch_size]
+            out = self.tokenizer(
+                batch_texts,
+                truncation=True,
+                max_length=self.max_length,
+                return_length=True,
+            )
+            train_lengths.extend(out['length'])
+        bucket_boundaries = get_bucket_boundaries(self.max_length)
+        train_sampler = BucketBatchSampler(
+            lengths=train_lengths,
+            bucket_boundaries=bucket_boundaries,
+            batch_size=self.batch_size,
+            drop_last=False,
+            shuffle=True,
+            seed=self.random_state,
+        )
+        
+        # DataLoader-ы (train — с бакетами, val — без)
         train_loader = DataLoader(
             train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True
+            batch_sampler=train_sampler,
+            collate_fn=collate_fn
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.batch_size,
-            shuffle=False
+            shuffle=False,
+            collate_fn=collate_fn
         )
 
         # Подготовка alpha для focal loss
@@ -403,6 +454,7 @@ class BERTModelTrainer:
         print("\nНачинаем обучение...")
 
         for epoch in range(self.epochs):
+            train_sampler.set_epoch(epoch)
             print(f"\nEpoch {epoch + 1}/{self.epochs}")
             # TRAIN
             self.model.train()
@@ -518,12 +570,12 @@ class BERTModelTrainer:
         val_probs_final = np.array(val_probs_final)
         val_labels_final = np.array(val_labels_final)
 
-        optimal_threshold, opt_precision, opt_recall = find_optimal_threshold(
+        optimal_threshold, opt_precision, opt_recall, opt_f1 = find_threshold_max_f1_min_precision(
             val_labels_final, val_probs_final, min_precision=0.9
         )
 
         val_preds_optimal = (val_probs_final >= optimal_threshold).astype(int)
-        opt_f1 = f1_score(val_labels_final, val_preds_optimal, zero_division=0)
+        # opt_f1 = f1_score(val_labels_final, val_preds_optimal, zero_division=0)
 
         print(f"\nОбучение завершено. Лучший Val AP: {best_val_ap:.4f}")
         print(f"\nОптимальный порог: {optimal_threshold:.4f}")
@@ -575,7 +627,7 @@ def main():
     """Основная функция для запуска из командной строки"""
     parser = argparse.ArgumentParser(description='Дообучение BERT модели для классификации токсичности')
     add_common_data_args(parser)
-    add_common_output_arg(parser, default_output_dir='models/bert')
+    add_common_output_arg(parser, default_output_dir='models/toxicity/bert')
     parser.add_argument(
         '--model-name',
         type=str,

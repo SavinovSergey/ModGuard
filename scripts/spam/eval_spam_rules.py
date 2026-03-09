@@ -48,7 +48,7 @@ def main() -> None:
         "--fp-caps6-output",
         type=str,
         default=None,
-        help="CSV со строками FP для правила CAPS_WORD_6 (не-спам, помеченный как спам). По умолчанию models/spam/caps6_fp.csv",
+        help="CSV со строками FP для правила CAPS_WORD_6 (не-спам, помеченный как спам). По умолчанию models/spam/tfidf/caps6_fp.csv",
     )
     args = parser.parse_args()
 
@@ -110,7 +110,7 @@ def main() -> None:
 
         # Сохранение строк с FP для CAPS_WORD_6 (важно минимизировать FP)
         if rule_id == "CAPS_WORD_6" and n_fp > 0:
-            fp_path = args.fp_caps6_output or "models/spam/caps6_fp.csv"
+            fp_path = args.fp_caps6_output or "models/spam/tfidf/caps6_fp.csv"
             fp_path = Path(fp_path)
             fp_path.parent.mkdir(parents=True, exist_ok=True)
             fp_indices = np.where((y_pred == 1) & (y_true == 0))[0]

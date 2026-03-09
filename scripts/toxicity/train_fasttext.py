@@ -329,7 +329,7 @@ def main():
     parser = argparse.ArgumentParser(description='Обучение FastText модели')
     add_common_data_args(parser)
     add_common_optuna_args(parser)
-    add_common_output_arg(parser, default_output_dir='models/fasttext')
+    add_common_output_arg(parser, default_output_dir='models/toxicity/fasttext')
     add_common_random_state_arg(parser)
     args = parser.parse_args()
     

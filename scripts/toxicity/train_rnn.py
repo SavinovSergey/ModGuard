@@ -19,9 +19,9 @@ from tqdm import tqdm
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from app.models.rnn_network import RNNClassifier
-from app.models.rnn_dataset import ToxicityDataset, collate_fn
-from app.models.rnn_tokenizers import create_tokenizer, BPETokenizer, RuBERTTokenizer
+from app.models.toxicity.rnn_network import RNNClassifier
+from app.models.toxicity.rnn_dataset import ToxicityDataset, collate_fn
+from app.models.toxicity.rnn_tokenizers import create_tokenizer, BPETokenizer, RuBERTTokenizer
 from scripts.shared.cli import (
     add_common_data_args,
     add_common_loss_args,
@@ -32,9 +32,10 @@ from scripts.shared.common import (
     BinaryFocalLoss,
     compute_auto_alpha,
     convert_to_json_serializable,
-    find_optimal_threshold,
+    find_threshold_max_f1_min_precision,
 )
 from scripts.shared.data import load_train_val_data, prepare_texts_neural
+from scripts.shared.bucketing import get_bucket_boundaries, BucketBatchSampler
 
 # Опциональный импорт для квантизации RNN
 try:
@@ -162,15 +163,6 @@ class RNNModelTrainer:
     def _compute_auto_alpha(y_train: np.ndarray) -> float:
         """Backward-compatible wrapper around shared auto-alpha logic."""
         return compute_auto_alpha(y_train)
-
-    @staticmethod
-    def _find_optimal_threshold(
-        y_true: np.ndarray,
-        y_proba: np.ndarray,
-        min_precision: float = 0.9,
-    ) -> Tuple[float, float, float]:
-        """Backward-compatible wrapper around shared threshold search."""
-        return find_optimal_threshold(y_true, y_proba, min_precision=min_precision)
 
     @staticmethod
     def _convert_to_json_serializable(obj):
@@ -319,17 +311,36 @@ class RNNModelTrainer:
         self.best_model_state = None
         self.best_score = 0.0
         
+        # Сортировка валидации по длине (меньше паддинга на инференсе)
+        val_lengths = [len(self.tokenizer.encode(t, max_length=self.max_length)) for t in X_val]
+        val_sort_idx = np.argsort(val_lengths)
+        X_val = [X_val[j] for j in val_sort_idx]
+        y_val = y_val[val_sort_idx]
+        
         # Создание датасетов
         train_dataset = ToxicityDataset(X_train, y_train.tolist(), self.tokenizer, max_length=self.max_length)
         val_dataset = ToxicityDataset(X_val, y_val.tolist(), self.tokenizer, max_length=self.max_length)
         
-        # DataLoader
+        # Длины для бакетного батчинга (round-robin, неполные батчи отдаём)
+        train_lengths = [
+            len(self.tokenizer.encode(t, max_length=self.max_length)) for t in X_train
+        ]
+        bucket_boundaries = get_bucket_boundaries(self.max_length)
+        train_sampler = BucketBatchSampler(
+            lengths=train_lengths,
+            bucket_boundaries=bucket_boundaries,
+            batch_size=self.batch_size,
+            drop_last=False,
+            shuffle=True,
+            seed=self.random_state,
+        )
+        
+        # DataLoader (train — с бакетами, val — без)
         pad_token_id = self.tokenizer.get_pad_token_id()
         collate_with_pad = partial(collate_fn, pad_token_id=pad_token_id)
         train_loader = DataLoader(
             train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
+            batch_sampler=train_sampler,
             collate_fn=collate_with_pad
         )
         val_loader = DataLoader(
@@ -407,6 +418,7 @@ class RNNModelTrainer:
         patience_counter = 0
         
         for epoch in range(self.epochs):
+            train_sampler.set_epoch(epoch)
             # Train
             self.model.train()
             train_loss = 0.0
@@ -513,13 +525,13 @@ class RNNModelTrainer:
                 val_probs_final.extend(probs)
                 val_labels_final.extend(labels.cpu().numpy())
         
-        optimal_threshold, opt_precision, opt_recall = find_optimal_threshold(
+        optimal_threshold, opt_precision, opt_recall, opt_f1 = find_threshold_max_f1_min_precision(
             np.array(val_labels_final), np.array(val_probs_final), min_precision=0.9
         )
         
         # Вычисляем финальные метрики с оптимальным порогом
         val_preds_optimal = (np.array(val_probs_final) >= optimal_threshold).astype(int)
-        opt_f1 = f1_score(val_labels_final, val_preds_optimal, zero_division=0)
+        # opt_f1 = f1_score(val_labels_final, val_preds_optimal, zero_division=0)
         
         if fold_idx is None:
             print(f"\nОбучение завершено. Лучший Val AP: {best_val_ap:.4f}")
@@ -623,7 +635,7 @@ def main():
         default='gru',
         help='Тип RNN (rnn, gru или lstm)'
     )
-    add_common_output_arg(parser, default_output_dir='models/rnn')
+    add_common_output_arg(parser, default_output_dir='models/toxicity/rnn')
     add_common_random_state_arg(parser)
     parser.add_argument(
         '--epochs',

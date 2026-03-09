@@ -7,11 +7,11 @@
 
 Использование:
   1. Отдельный скрипт:
-     python scripts/toxicity/quantize_rnn.py models/rnn/model.pt models/rnn/tokenizer.json -o models/rnn_quantized
+     python scripts/toxicity/quantize_rnn.py models/toxicity/rnn/model.pt models/toxicity/rnn/tokenizer.json -o models/toxicity/rnn
 
   2. Импорт после обучения:
      from scripts.toxicity.quantize_rnn import quantize_rnn_model
-     quantize_rnn_model("models/rnn/model.pt", "models/rnn/tokenizer.json", "models/rnn_quantized")
+     quantize_rnn_model("models/toxicity/rnn/model.pt", "models/toxicity/rnn/tokenizer.json", "models/toxicity/rnn")
 """
 from __future__ import annotations
 
@@ -42,8 +42,8 @@ import sys
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from app.models.rnn_network import RNNClassifier
-from app.models.rnn_tokenizers import create_tokenizer
+from app.models.toxicity.rnn_network import RNNClassifier
+from app.models.toxicity.rnn_tokenizers import create_tokenizer
 
 
 def quantize_rnn_model(

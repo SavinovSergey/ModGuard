@@ -336,7 +336,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Обучение TF-IDF модели спама (TF-IDF + ручные признаки)")
     add_common_data_args(parser)
     add_common_optuna_args(parser)
-    add_common_output_arg(parser, default_output_dir="models/spam")
+    add_common_output_arg(parser, default_output_dir="models/spam/tfidf")
     add_common_random_state_arg(parser)
     args = parser.parse_args()
 

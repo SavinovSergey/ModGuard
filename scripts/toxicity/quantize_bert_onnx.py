@@ -7,12 +7,12 @@
 
 Использование:
   1. Отдельный скрипт:
-     python scripts/toxicity/quantize_bert_onnx.py models/bert -o models/bert_onnx --device cpu
-     python scripts/toxicity/quantize_bert_onnx.py models/bert -o models/bert_onnx_gpu --device gpu
+     python scripts/toxicity/quantize_bert_onnx.py models/toxicity/bert -o models/toxicity/bert/onnx --device cpu
+     python scripts/toxicity/quantize_bert_onnx.py models/toxicity/bert -o models/toxicity/bert/onnx_gpu --device gpu
 
   2. Импорт после обучения:
      from scripts.toxicity.quantize_bert_onnx import quantize_bert_to_onnx
-     quantize_bert_to_onnx("models/bert", "models/bert_onnx", device="cpu")
+     quantize_bert_to_onnx("models/toxicity/bert", "models/toxicity/bert/onnx", device="cpu")
 """
 from __future__ import annotations
 
