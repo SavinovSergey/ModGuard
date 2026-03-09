@@ -12,7 +12,8 @@ from app.services.spam import SpamService
 
 if TYPE_CHECKING:
     from app.core.cache import ModerationCache
-    from app.models.spam_tfidf_model import SpamTfidfModel
+    from app.models.spam.regex_model import SpamRegexModel
+    from app.models.spam.tfidf_model import SpamTfidfModel
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,12 @@ class ClassificationService:
         model_manager: ModelManager,
         moderation_cache: Optional["ModerationCache"] = None,
         spam_model: Optional["SpamTfidfModel"] = None,
+        spam_regex_model: Optional["SpamRegexModel"] = None,
     ):
         self.model_manager = model_manager
         self._cache = moderation_cache
         self._toxicity = ToxicityService(model_manager, moderation_cache)
-        self._spam = SpamService(spam_model=spam_model)
+        self._spam = SpamService(spam_model=spam_model, spam_regex_model=spam_regex_model)
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="moderation")
 
     def classify(
