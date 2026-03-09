@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ToxicFilter — демо чат</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="chat-container">
+    <header class="chat-header">
+      <h1>ToxicFilter</h1>
+      <p class="subtitle">Введите сообщение — получите оценку: нормальное, токсичность или спам.</p>
+    </header>
+    <div id="messages" class="messages" role="log" aria-live="polite"></div>
+    <form id="chat-form" class="chat-form" aria-label="Отправить сообщение">
+      <input
+        type="text"
+        id="message-input"
+        class="message-input"
+        placeholder="Введите сообщение..."
+        autocomplete="off"
+        aria-label="Текст сообщения"
+      />
+      <button type="submit" id="send-btn" class="send-btn">Отправить</button>
+    </form>
+  </div>
+  <script src="/static/chat.js"></script>
+</body>
+</html>

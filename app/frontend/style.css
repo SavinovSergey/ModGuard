@@ -1,0 +1,153 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: #1a1b26;
+  color: #a9b1d6;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.chat-container {
+  width: 100%;
+  max-width: 560px;
+  height: 85vh;
+  max-height: 640px;
+  display: flex;
+  flex-direction: column;
+  background: #24283b;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.chat-header {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #3b4261;
+  flex-shrink: 0;
+}
+
+.chat-header h1 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #c0caf5;
+}
+
+.chat-header .subtitle {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: #787c99;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.message {
+  max-width: 85%;
+  padding: 0.6rem 0.9rem;
+  border-radius: 12px;
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.message-user {
+  align-self: flex-end;
+  background: #414868;
+  color: #c0caf5;
+  border-bottom-right-radius: 4px;
+}
+
+.message-system {
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+}
+
+.message-system.normal {
+  background: #2d3348;
+  color: #9ece6a;
+  border-left: 3px solid #9ece6a;
+}
+
+.message-system.toxic {
+  background: #2d3348;
+  color: #f7768e;
+  border-left: 3px solid #f7768e;
+}
+
+.message-system.spam {
+  background: #2d3348;
+  color: #ff9e64;
+  border-left: 3px solid #ff9e64;
+}
+
+.message-system.both {
+  background: #2d3348;
+  color: #bb9af7;
+  border-left: 3px solid #bb9af7;
+}
+
+.message-system.error {
+  background: #2d3348;
+  color: #f7768e;
+  border-left: 3px solid #f7768e;
+}
+
+.chat-form {
+  display: flex;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid #3b4261;
+  flex-shrink: 0;
+}
+
+.message-input {
+  flex: 1;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.9375rem;
+  border: 1px solid #3b4261;
+  border-radius: 8px;
+  background: #1a1b26;
+  color: #c0caf5;
+  outline: none;
+}
+
+.message-input::placeholder {
+  color: #565f89;
+}
+
+.message-input:focus {
+  border-color: #7aa2f7;
+}
+
+.send-btn {
+  padding: 0.6rem 1rem;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: #1a1b26;
+  background: #7aa2f7;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.send-btn:hover {
+  background: #89b4fa;
+}
+
+.send-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
