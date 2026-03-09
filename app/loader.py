@@ -9,19 +9,29 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def get_spam_regex_model() -> "SpamRegexModel":
+    """Создаёт и возвращает regex-модель для быстрого обнаружения спама."""
+    from app.models.spam.regex_model import SpamRegexModel
+
+    model = SpamRegexModel()
+    model.load()
+    logger.info("Spam regex pre-filter loaded (%d categories)", len(model.categories))
+    return model
+
+
 def get_spam_model() -> Optional["SpamTfidfModel"]:
     """Загружает TF-IDF модель спама из models/spam/ при наличии файлов. Иначе None."""
     try:
-        from app.models.spam_tfidf_model import SpamTfidfModel
-        model_path = Path("models/spam/model.pkl")
-        vectorizer_path = Path("models/spam/vectorizer.pkl")
+        from app.models.spam.tfidf_model import SpamTfidfModel
+        model_path = Path("models/spam/tfidf/model.pkl")
+        vectorizer_path = Path("models/spam/tfidf/vectorizer.pkl")
         if model_path.exists() and vectorizer_path.exists():
             spam_model = SpamTfidfModel()
             spam_model.load(
                 model_path=str(model_path),
                 vectorizer_path=str(vectorizer_path),
             )
-            logger.info("Spam TF-IDF model loaded from models/spam/")
+            logger.info("Spam TF-IDF model loaded from models/spam/tfidf/")
             return spam_model
     except Exception as e:
         logger.warning("Could not load spam model: %s", e)
@@ -30,15 +40,15 @@ def get_spam_model() -> Optional["SpamTfidfModel"]:
 
 def register_all_models(model_manager: ModelManager) -> None:
     """Регистрирует все доступные модели по путям (tfidf, fasttext, rnn, bert) и regex."""
-    from app.models.regex_model import RegexModel
+    from app.models.toxicity.regex_model import RegexModel
 
     regex_model = RegexModel()
     model_manager.register_model("regex", regex_model)
 
     try:
-        from app.models.tfidf_model import TfidfModel
-        model_path = Path("models/tfidf/model.pkl")
-        vectorizer_path = Path("models/tfidf/vectorizer.pkl")
+        from app.models.toxicity.tfidf_model import TfidfModel
+        model_path = Path("models/toxicity/tfidf/model.pkl")
+        vectorizer_path = Path("models/toxicity/tfidf/vectorizer.pkl")
         if model_path.exists() and vectorizer_path.exists():
             tfidf_model = TfidfModel()
             tfidf_model.load(model_path=str(model_path), vectorizer_path=str(vectorizer_path))
@@ -48,8 +58,8 @@ def register_all_models(model_manager: ModelManager) -> None:
         logger.warning("Could not register TF-IDF model: %s", e)
 
     try:
-        from app.models.fasttext_model import FastTextModel
-        model_path = Path("models/fasttext/fasttext_model.bin")
+        from app.models.toxicity.fasttext_model import FastTextModel
+        model_path = Path("models/toxicity/fasttext/fasttext_model.bin")
         if model_path.exists():
             fasttext_model = FastTextModel()
             fasttext_model.load(model_path=str(model_path))
@@ -59,8 +69,8 @@ def register_all_models(model_manager: ModelManager) -> None:
         logger.warning("Could not register FastText model: %s", e)
 
     try:
-        from app.models.rnn_model import RNNModel
-        rnn_dir = Path("models/rnn")
+        from app.models.toxicity.rnn_model import RNNModel
+        rnn_dir = Path("models/toxicity/rnn")
         tokenizer_path = rnn_dir / "tokenizer.json"
         model_path = rnn_dir / "model_quantized.pt"
         if not model_path.exists():
@@ -74,10 +84,10 @@ def register_all_models(model_manager: ModelManager) -> None:
         logger.warning("Could not register RNN model: %s", e)
 
     try:
-        from app.models.bert_model import BERTModel
+        from app.models.toxicity.bert_model import BERTModel
         bert_model = BERTModel()
         bert_loaded = False
-        for bert_dir in (Path("models/bert"), Path("models/bert_onnx"), Path("models/bert_onnx_cpu")):
+        for bert_dir in (Path("models/toxicity/bert"), Path("models/toxicity/bert/onnx"), Path("models/toxicity/bert/onnx_cpu")):
             if not bert_dir.is_dir():
                 continue
             try:

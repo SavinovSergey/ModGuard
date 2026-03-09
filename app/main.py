@@ -1,9 +1,12 @@
 """Главный файл FastAPI приложения"""
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 
 from app.core.config import settings
 from app.core.model_manager import ModelManager
@@ -11,7 +14,7 @@ from app.core.cache import ModerationCache, NoOpModerationCache
 from app.core.task_store import TaskStore
 from app.core.db import init_db
 from app.services.classification import ClassificationService
-from app.loader import register_all_models, get_spam_model
+from app.loader import register_all_models, get_spam_model, get_spam_regex_model
 from app.api.routes import router
 
 # Настройка логирования
@@ -66,7 +69,8 @@ async def lifespan(app: FastAPI):
     logger.info("Registering models...")
     register_all_models(model_manager)
 
-    # Опциональная модель спама (models/spam/)
+    # Модели спама: regex pre-filter + TF-IDF (опционально)
+    spam_regex_model = get_spam_regex_model()
     spam_model = get_spam_model()
 
     # Инициализация сервиса классификации (токсичность + спам, кэш)
@@ -74,6 +78,7 @@ async def lifespan(app: FastAPI):
         model_manager,
         moderation_cache=moderation_cache,
         spam_model=spam_model,
+        spam_regex_model=spam_regex_model,
     )
 
     logger.info("Service started successfully")
@@ -108,6 +113,17 @@ app.add_middleware(
 
 # Подключение роутеров
 app.include_router(router, prefix=settings.api_prefix)
+
+# Фронтенд: чат-демо
+_frontend_dir = Path(__file__).resolve().parent / "frontend"
+if _frontend_dir.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_frontend_dir)), name="frontend")
+
+
+@app.get("/chat", tags=["frontend"])
+async def chat_page():
+    """Редирект на страницу чата-демо."""
+    return RedirectResponse(url="/static/index.html")
 
 
 @app.get("/", tags=["root"])

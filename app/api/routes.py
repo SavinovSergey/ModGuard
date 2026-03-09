@@ -1,4 +1,4 @@
-"""API routes для микросервиса"""
+"""API routes модерации: классификация на токсичность и спам."""
 import logging
 import uuid
 from typing import List, Optional
@@ -38,9 +38,16 @@ def _process_batch_async(
     task_id: str,
     texts: List[str],
     preferred_model: Optional[str],
+    classification_service: Optional["ClassificationService"] = None,
+    task_store: Optional[TaskStore] = None,
 ) -> None:
-    """Фоновая обработка батча: классификация и запись результата в task_store."""
-    from app.main import classification_service, task_store
+    """Фоновая обработка батча: классификация на токсичность и спам, запись результата в task_store.
+    service/store передаются из роута (Depends), чтобы тесты могли подменять их без lifespan.
+    """
+    if classification_service is None or task_store is None:
+        from app.main import classification_service as _svc, task_store as _store
+        classification_service = classification_service or _svc
+        task_store = task_store or _store
     try:
         task_store.set_task_processing(task_id)
         results = classification_service.classify_batch(
@@ -77,11 +84,14 @@ async def classify(
     service: ClassificationService = Depends(get_classification_service)
 ):
     """
-    Классифицирует один комментарий на токсичность
-    
+    Классифицирует один комментарий на токсичность и спам.
+
+    В ответе: is_toxic, toxicity_score, toxicity_types, model_used (токсичность);
+    is_spam, spam_score (спам).
+
     - **text**: Текст комментария для классификации
     - **context**: Контекст обсуждения (опционально)
-    - **preferred_model**: Предпочтительная модель (опционально)
+    - **preferred_model**: Предпочтительная модель токсичности (опционально)
     """
     try:
         result = service.classify(
@@ -106,10 +116,12 @@ async def classify_batch(
     service: ClassificationService = Depends(get_classification_service)
 ):
     """
-    Классифицирует батч комментариев на токсичность
-    
+    Классифицирует батч комментариев на токсичность и спам.
+
+    В каждом элементе ответа: поля токсичности (is_toxic, toxicity_score, ...) и спама (is_spam, spam_score).
+
     - **texts**: Список текстов для классификации (максимум 1000)
-    - **preferred_model**: Предпочтительная модель (опционально)
+    - **preferred_model**: Предпочтительная модель токсичности (опционально)
     """
     if len(request.texts) > settings.max_batch_size:
         raise HTTPException(
@@ -145,9 +157,9 @@ async def health_check(
     service: ClassificationService = Depends(get_classification_service)
 ):
     """
-    Проверка здоровья сервиса
-    
-    Возвращает статус сервиса и информацию о загруженной модели
+    Проверка здоровья сервиса.
+
+    Возвращает статус и информацию о загруженной модели токсичности (модели спама учитываются отдельно).
     """
     try:
         model_info = service.get_model_info()
@@ -175,10 +187,13 @@ async def health_check(
 async def classify_batch_async(
     request: BatchAsyncRequest,
     background_tasks: BackgroundTasks,
+    classification_service: ClassificationService = Depends(get_classification_service),
     task_store: TaskStore = Depends(get_task_store),
 ):
     """
     Принимает батч текстов, возвращает task_id. Результат получать по GET /tasks/{task_id}.
+
+    Классификация выполняется на токсичность и спам; в результатах — поля is_toxic, is_spam и т.д.
     При настроенных Postgres и RabbitMQ задача уходит в воркер; иначе обрабатывается в фоне (Phase 1).
     """
     if len(request.items) > settings.max_batch_size:
@@ -206,6 +221,8 @@ async def classify_batch_async(
         task_id,
         texts,
         request.preferred_model,
+        classification_service,
+        task_store,
     )
     return BatchAsyncResponse(task_id=task_id)
 
@@ -219,7 +236,7 @@ async def get_task_status(
     task_id: str,
     task_store: TaskStore = Depends(get_task_store),
 ):
-    """Получить статус и результат задачи по task_id (polling). Читает из Postgres при наличии, иначе из Redis/in-memory."""
+    """Получить статус и результат задачи по task_id (polling). Результаты содержат токсичность и спам. Читает из Postgres при наличии, иначе из Redis/in-memory."""
     data = None
     if settings.database_url:
         data = get_task_pg(task_id)
@@ -243,9 +260,9 @@ async def get_stats(
     model_manager = Depends(get_model_manager)
 ):
     """
-    Получить статистику использования моделей
-    
-    Возвращает статистику ошибок, таймаутов и успешных запросов для каждой модели
+    Получить статистику использования моделей токсичности.
+
+    Возвращает статистику ошибок, таймаутов и успешных запросов для каждой модели (спам в статистику не входит).
     """
     try:
         stats = model_manager.get_stats()
