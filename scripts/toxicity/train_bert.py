@@ -101,6 +101,8 @@ class BERTModelTrainer:
         warmup_steps: Optional[int] = 0,
         warmup_ratio: Optional[float] = 0,
         lr_scheduler_type: str = 'linear',
+        lr_schedule_patience: int = 2,
+        lr_schedule_factor: float = 0.2,
         no_freeze: bool = True,
         freeze_encoder: bool = True,
         freeze_last_n_layers: int = 0,
@@ -124,7 +126,9 @@ class BERTModelTrainer:
             weight_decay: Weight decay
             warmup_steps: Количество шагов warmup (приоритет над warmup_ratio)
             warmup_ratio: Доля шагов для warmup
-            lr_scheduler_type: Тип scheduler (linear, cosine, constant)
+            lr_scheduler_type: Тип scheduler (linear, cosine, constant, plateau)
+            lr_schedule_patience: Patience для ReduceLROnPlateau (только для lr_scheduler_type=plateau)
+            lr_schedule_factor: Фактор уменьшения LR для ReduceLROnPlateau (только для plateau)
             no_freeze: Не замораживать модель вовсе
             freeze_encoder: Замораживать ли энкодер (кроме последнего слоя)
             freeze_last_n_layers: Количество последних слоев для заморозки (0 = разморозить только последний)
@@ -146,6 +150,8 @@ class BERTModelTrainer:
         self.warmup_steps = warmup_steps
         self.warmup_ratio = warmup_ratio
         self.lr_scheduler_type = lr_scheduler_type
+        self.lr_schedule_patience = lr_schedule_patience
+        self.lr_schedule_factor = lr_schedule_factor
         self.no_freeze = no_freeze
         self.freeze_encoder = freeze_encoder
         self.freeze_last_n_layers = freeze_last_n_layers
@@ -290,7 +296,9 @@ class BERTModelTrainer:
         print(f"Устройство: {self.device}")
         print(f"Модель: {self.model_name}")
         print(f"Параметры: max_length={self.max_length}, batch_size={self.batch_size}, "
-              f"learning_rate={self.learning_rate}, epochs={self.epochs}")
+              f"learning_rate={self.learning_rate}, epochs={self.epochs}, max_grad_norm={self.max_grad_norm}")
+        print(f"LR scheduler: {self.lr_scheduler_type}"
+              + (f" (patience={self.lr_schedule_patience}, factor={self.lr_schedule_factor})" if self.lr_scheduler_type == 'plateau' else ""))
         
         # Загружаем модель и токенизатор
         self.load_model_and_tokenizer()
@@ -427,7 +435,17 @@ class BERTModelTrainer:
                 scheduler = get_constant_schedule_with_warmup(
                     optimizer,
                     num_warmup_steps=num_warmup_steps
-                )        
+                )
+            elif self.lr_scheduler_type == 'plateau':
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode='max',
+                    factor=self.lr_schedule_factor,
+                    patience=self.lr_schedule_patience
+                )
+
+        # step-based schedulers (linear/cosine/constant) — по шагам; plateau — по эпохам после валидации
+        scheduler_step_per_batch = scheduler is not None and self.lr_scheduler_type != 'plateau'
 
         # Loss и optimizer
         if self.loss_type == 'focal':
@@ -455,7 +473,11 @@ class BERTModelTrainer:
 
         for epoch in range(self.epochs):
             train_sampler.set_epoch(epoch)
-            print(f"\nEpoch {epoch + 1}/{self.epochs}")
+            if self.no_freeze:
+                current_lr = optimizer.param_groups[2]['lr']
+            else:
+                current_lr = optimizer.param_groups[0]['lr']
+            print(f"\nEpoch {epoch + 1}/{self.epochs} (LR: {current_lr:.2e})")
             # TRAIN
             self.model.train()
             train_loss = 0.0
@@ -481,7 +503,7 @@ class BERTModelTrainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_grad_norm)
 
                 optimizer.step()
-                if scheduler is not None:
+                if scheduler_step_per_batch:
                     scheduler.step()
 
                 train_loss += loss.item()
@@ -527,6 +549,9 @@ class BERTModelTrainer:
                 val_ap = 0.0
                 val_precision = val_recall = val_f1 = 0.0
 
+            # ReduceLROnPlateau — шаг по эпохе после валидации
+            if scheduler is not None and self.lr_scheduler_type == 'plateau':
+                scheduler.step(val_ap)
             print(f"  Train Loss: {train_loss:.4f}, Train AP: {train_ap:.4f}")
             print(f"  Val   Loss: {val_loss:.4f}, Val   AP: {val_ap:.4f}")
             print(f"  Val Precision: {val_precision:.4f}, Recall: {val_recall:.4f}, F1: {val_f1:.4f} (threshold=0.5)")
@@ -602,6 +627,9 @@ class BERTModelTrainer:
             'warmup_steps': self.warmup_steps,
             'warmup_ratio': self.warmup_ratio,
             'lr_scheduler_type': self.lr_scheduler_type,
+            'lr_schedule_patience': self.lr_schedule_patience,
+            'lr_schedule_factor': self.lr_schedule_factor,
+            'max_grad_norm': self.max_grad_norm,
             'freeze_encoder': self.freeze_encoder,
             'freeze_last_n_layers': self.freeze_last_n_layers,
             'dropout': self.dropout,
@@ -679,9 +707,27 @@ def main():
     parser.add_argument(
         '--lr-scheduler-type',
         type=str,
-        choices=['linear', 'cosine', 'constant'],
+        choices=['linear', 'cosine', 'constant', 'plateau'],
         default='linear',
-        help='Тип learning rate scheduler'
+        help='Тип learning rate scheduler (plateau = ReduceLROnPlateau по val AP)'
+    )
+    parser.add_argument(
+        '--lr-schedule-patience',
+        type=int,
+        default=2,
+        help='Patience для ReduceLROnPlateau (только при --lr-scheduler-type plateau)'
+    )
+    parser.add_argument(
+        '--lr-schedule-factor',
+        type=float,
+        default=0.2,
+        help='Фактор уменьшения LR для ReduceLROnPlateau (только при plateau)'
+    )
+    parser.add_argument(
+        '--max-grad-norm',
+        type=float,
+        default=1.0,
+        help='Максимальная норма градиента для clipping (0.0 = отключить)'
     )
     parser.add_argument(
         '--no-freeze',
@@ -755,14 +801,17 @@ def main():
         warmup_steps=args.warmup_steps,
         warmup_ratio=args.warmup_ratio,
         lr_scheduler_type=args.lr_scheduler_type,
+        lr_schedule_patience=args.lr_schedule_patience,
+        lr_schedule_factor=args.lr_schedule_factor,
         no_freeze=args.no_freeze,
         freeze_encoder=args.freeze_encoder,
         freeze_last_n_layers=args.freeze_last_n_layers,
         dropout=args.dropout,
         loss_type=args.loss_type,
         focal_gamma=args.focal_gamma,
-        focal_alpha = args.focal_alpha,
+        focal_alpha=args.focal_alpha,
         focal_auto_alpha=args.focal_auto_alpha,
+        max_grad_norm=args.max_grad_norm,
         random_state=args.random_state
     )
     

@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -24,6 +26,66 @@ from typing import List, Optional, Union
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(_PROJECT_ROOT))
+
+
+def _load_state_dict_from_dir(model_dir: Path):
+    """Загружает state_dict из директории (pytorch_model.bin или model.safetensors)."""
+    if (model_dir / "model.safetensors").exists():
+        from safetensors.torch import load_file
+        return load_file(model_dir / "model.safetensors")
+    if (model_dir / "pytorch_model.bin").exists():
+        import torch
+        return torch.load(model_dir / "pytorch_model.bin", map_location="cpu")
+    raise FileNotFoundError(
+        f"Не найден pytorch_model.bin или model.safetensors в {model_dir}"
+    )
+
+
+def _prepare_model_dir_for_export(model_path: Path):
+    """
+    Подготавливает директорию с моделью для экспорта в ONNX.
+    Если чекпоинт дообученный (голова classifier.1.weight/bias), переименовывает ключи
+    в classifier.weight/bias, чтобы стандартный BertForSequenceClassification загрузил веса.
+    Возвращает путь к временной директории (caller должен удалить после использования).
+    """
+    model_path = Path(model_path)
+    state_dict = _load_state_dict_from_dir(model_path)
+
+    if "classifier.1.weight" not in state_dict:
+        # Стандартная HF-модель — можно экспортировать из исходной папки
+        return None
+
+    # Дообученная модель: голова Sequential(Dropout, Linear) → ключи classifier.1.*
+    # Приводим к виду classifier.weight / classifier.bias для HF
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k == "classifier.1.weight":
+            new_state_dict["classifier.weight"] = v
+        elif k == "classifier.1.bias":
+            new_state_dict["classifier.bias"] = v
+        else:
+            new_state_dict[k] = v
+
+    tmpdir = tempfile.mkdtemp(prefix="bert_onnx_export_")
+    tmpdir_path = Path(tmpdir)
+    for f in model_path.iterdir():
+        if f.is_file():
+            shutil.copy2(f, tmpdir_path / f.name)
+    # Конфиг: одна выходная логит → num_labels=1
+    import json
+    config_path = tmpdir_path / "config.json"
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        config["num_labels"] = 1
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    # Перезаписываем веса переименованным state_dict
+    import torch
+    torch.save(new_state_dict, tmpdir_path / "pytorch_model.bin")
+    if (tmpdir_path / "model.safetensors").exists():
+        (tmpdir_path / "model.safetensors").unlink()
+    return tmpdir_path
 
 
 def _ensure_optimum_onnx():
@@ -75,11 +137,20 @@ def quantize_bert_to_onnx_cpu(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    export_dir = _prepare_model_dir_for_export(model_path)
+    load_path = str(export_dir if export_dir is not None else model_path)
+    if export_dir is not None:
+        print("Подготовлена дообученная модель (голова classifier.1 → classifier) для экспорта.")
+
     print(f"Загрузка модели из {model_path}...")
-    ort_model = ORTModel.from_pretrained(
-        str(model_path),
-        export=True,
-    )
+    try:
+        ort_model = ORTModel.from_pretrained(
+            load_path,
+            export=True,
+        )
+    finally:
+        if export_dir is not None:
+            shutil.rmtree(export_dir, ignore_errors=True)
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
@@ -91,7 +162,6 @@ def quantize_bert_to_onnx_cpu(
         return output_dir
 
     # Сохраняем ONNX во временную директорию для квантизации
-    import tempfile
     arch_map = {
         "avx2": lambda: AutoQuantizationConfig.avx2(is_static=False, per_channel=per_channel),
         "avx512": lambda: AutoQuantizationConfig.avx512(is_static=False, per_channel=per_channel),
@@ -109,7 +179,6 @@ def quantize_bert_to_onnx_cpu(
         quantizer.quantize(save_dir=str(output_dir), quantization_config=qconfig)
 
     tokenizer.save_pretrained(str(output_dir))
-    import shutil
     for fname in ("config.json", "params.json"):
         src = model_path / fname
         if src.exists():
@@ -151,11 +220,20 @@ def quantize_bert_to_onnx_gpu(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    export_dir = _prepare_model_dir_for_export(model_path)
+    load_path = str(export_dir if export_dir is not None else model_path)
+    if export_dir is not None:
+        print("Подготовлена дообученная модель (голова classifier.1 → classifier) для экспорта.")
+
     print(f"Загрузка модели из {model_path}...")
-    ort_model = ORTModel.from_pretrained(
-        str(model_path),
-        export=True,
-    )
+    try:
+        ort_model = ORTModel.from_pretrained(
+            load_path,
+            export=True,
+        )
+    finally:
+        if export_dir is not None:
+            shutil.rmtree(export_dir, ignore_errors=True)
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
@@ -230,7 +308,6 @@ def quantize_bert_to_onnx_gpu(
     )
 
     tokenizer.save_pretrained(str(output_dir))
-    import shutil
     for fname in ("config.json", "params.json"):
         src = model_path / fname
         if src.exists():
@@ -286,7 +363,7 @@ def main():
         "-o", "--output-dir",
         type=str,
         default=None,
-        help="Директория для сохранения ONNX модели (по умолчанию: <model_path>_onnx_<device>)",
+        help="Директория для сохранения ONNX модели (по умолчанию: <model_path>/onnx_<device>)",
     )
     parser.add_argument(
         "--device",
@@ -333,7 +410,7 @@ def main():
 
     output_dir = args.output_dir
     if output_dir is None:
-        output_dir = f"{model_path}_onnx_{args.device}"
+        output_dir = f"{model_path}/onnx_{args.device}"
     output_dir = Path(output_dir)
 
     calibration_texts = None

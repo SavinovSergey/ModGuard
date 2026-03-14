@@ -172,15 +172,25 @@ def main() -> None:
         y_true = (np.asarray(y_true) != 0).astype(np.int64)
     print(f"Примеров: {len(texts)} (toxic: {int(y_true.sum())})")
 
+    # Сортировка по длине (убывание) — в батче похожие длины, меньше паддинга, быстрее инференс
+    lengths = np.array([len(t) for t in texts], dtype=np.int64)
+    sort_idx = np.argsort(-lengths)
+    inv_idx = np.empty_like(sort_idx)
+    inv_idx[sort_idx] = np.arange(len(sort_idx))
+
+    texts_sorted = [texts[i] for i in sort_idx]
+    y_true_sorted = y_true[sort_idx]
+
     batch_size = args.batch_size
     results = []
-    for start in tqdm(range(0, len(texts), batch_size), desc=f"Получение предсказаний {model_type}..."):
-        batch = texts[start : start + batch_size]
+    for start in tqdm(range(0, len(texts_sorted), batch_size), desc=f"Получение предсказаний {model_type}..."):
+        batch = texts_sorted[start : start + batch_size]
         results.extend(model.predict_batch(batch))
-        # done = min(start + batch_size, len(texts))
     print()
 
-    y_proba = np.array([r.get("toxicity_score", 0.0) for r in results], dtype=np.float64)
+    y_proba_sorted = np.array([r.get("toxicity_score", 0.0) for r in results], dtype=np.float64)
+    y_proba = y_proba_sorted[inv_idx]
+    y_true = y_true_sorted[inv_idx]
 
     is_binary = model_type == "regex"
     if is_binary:
