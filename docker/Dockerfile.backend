@@ -1,0 +1,63 @@
+# Образ backend (worker): классификация токсичности и спама (полный ML-стек)
+# Используем Python 3.10 для совместимости с FastText и numpy < 2.0
+#
+# Сборка:
+#   CPU (по умолчанию):  docker build -f docker/Dockerfile.backend -t worker .
+#   GPU:                 docker build -f docker/Dockerfile.backend --build-arg DEVICE=gpu -t worker:gpu .
+
+FROM python:3.10-slim as base
+
+ARG DEVICE=cpu
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt requirements-gpu.txt ./
+
+# PyTorch явно: только CPU или CUDA-шины (индексы PyTorch), затем остальные зависимости
+RUN pip install --no-cache-dir --upgrade pip && \
+    if [ "$DEVICE" = "gpu" ]; then \
+        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu118 && \
+        pip install --no-cache-dir -r requirements.txt && \
+        pip install --no-cache-dir -r requirements-gpu.txt; \
+    else \
+        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
+
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --version
+
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app && \
+    chown -R appuser:appuser /app
+
+WORKDIR /app
+
+COPY --from=base /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+COPY --from=base /usr/local/bin /usr/local/bin
+
+COPY app/ ./app/
+COPY scripts/ ./scripts/
+
+RUN mkdir -p /app/models && chown -R appuser:appuser /app
+
+USER appuser
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MODEL_TYPE=regex \
+    LOG_LEVEL=INFO
+
+# Команда задаётся в docker-compose (run_worker.py)
+CMD ["python", "scripts/run/run_worker.py"]

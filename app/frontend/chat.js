@@ -3,6 +3,7 @@
   var input = document.getElementById("message-input");
   var messagesEl = document.getElementById("messages");
   var sendBtn = document.getElementById("send-btn");
+  var API_PREFIX = "/api/v1";
 
   function formatResponse(data) {
     if (data.error) {
@@ -41,6 +42,42 @@
     sendBtn.disabled = loading;
   }
 
+  function pollTask(taskId, maxAttempts, intervalMs) {
+    return new Promise(function (resolve, reject) {
+      var attempts = 0;
+      function poll() {
+        fetch(API_PREFIX + "/tasks/" + taskId)
+          .then(function (res) {
+            if (!res.ok) {
+              if (res.status === 404) return resolve(null);
+              return res.json().then(function (body) {
+                reject(new Error(body.detail || res.statusText));
+              }).catch(function () { reject(new Error(res.statusText)); });
+            }
+            return res.json();
+          })
+          .then(function (data) {
+            if (data.status === "completed" && data.results && data.results.length > 0) {
+              resolve(data.results[0]);
+              return;
+            }
+            if (data.status === "failed") {
+              resolve({ error: data.error || "Classification failed" });
+              return;
+            }
+            attempts++;
+            if (attempts >= maxAttempts) {
+              resolve({ error: "Timeout waiting for result" });
+              return;
+            }
+            setTimeout(poll, intervalMs);
+          })
+          .catch(reject);
+      }
+      poll();
+    });
+  }
+
   form.addEventListener("submit", function (e) {
     e.preventDefault();
     var text = (input.value || "").trim();
@@ -48,9 +85,9 @@
 
     input.value = "";
     appendMessage(text, "message-user");
-
     setLoading(true);
-    fetch("/api/v1/classify", {
+
+    fetch(API_PREFIX + "/classify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: text }),
@@ -66,6 +103,17 @@
         return res.json();
       })
       .then(function (data) {
+        var taskId = data.task_id;
+        if (!taskId) {
+          throw new Error("No task_id in response");
+        }
+        return pollTask(taskId, 60, 500);
+      })
+      .then(function (data) {
+        if (!data) {
+          appendMessage("Ошибка: задача не найдена", "message-system error");
+          return;
+        }
         var result = formatResponse(data);
         appendMessage(result.text, "message-system " + result.type);
       })

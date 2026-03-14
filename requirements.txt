@@ -20,21 +20,23 @@ emoji>=2.8.0
 
 # Утилиты
 python-multipart>=0.0.6
+redis>=5.0.0
+pika>=1.3.0
+psycopg2-binary>=2.9.0
 
 # Тестирование
 pytest>=7.4.3
 pytest-cov>=4.1.0
 pytest-asyncio>=0.21.0  # Для тестирования async endpoints
 
-# PyTorch для RNN модели
-torch>=1.13.0  # Поддерживает Python 3.10
-transformers>=4.20.0  # Совместим с Python 3.10
+# PyTorch не указан здесь: в Docker ставится явно (только CPU или только CUDA) по build-arg DEVICE.
+# Локально CPU: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Локально GPU: pip install torch --index-url https://download.pytorch.org/whl/cu118
+transformers>=4.20.0  # Совместим с Python 3.10 (зависимость torch уже установлена выше в Dockerfile)
 
-# ONNX квантизация BERT (опционально)
-# CPU: optimum[onnxruntime] (по умолчанию)
-# GPU/TensorRT: pip install optimum[onnxruntime-gpu]
+# ONNX Runtime и BERT (CPU)
 optimum[onnxruntime]>=1.14.0
-onnxruntime>=1.15.0  # Явная зависимость для ONNX Runtime
+onnxruntime>=1.15.0
 tokenizers>=0.13.0  # Для BPE токенизатора
 sentencepiece>=0.1.95  # Требуется для MarianTokenizer (модели перевода)
 sacremoses>=0.1.1
