@@ -182,3 +182,15 @@ def get_task_pg(task_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning("get_task_pg failed: %s", e)
         return None
+
+
+def delete_task_pg(task_id: str) -> None:
+    """Удаляет запись задачи из Postgres (например, после healthcheck)."""
+    if not settings.database_url:
+        return
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM moderation_tasks WHERE task_id = %s", (task_id,))
+    except Exception as e:
+        logger.warning("delete_task_pg failed: %s", e)
