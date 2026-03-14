@@ -40,7 +40,8 @@ class ClassifyResponse(BaseModel):
                 "is_toxic": True,
                 "toxicity_score": 0.95,
                 "toxicity_types": {"ебать": 1.0, "прочее": 0.8},
-                "model_used": "regex",
+                "tox_model_used": "regex",
+                "spam_model_used": "regex",
                 "is_spam": False,
                 "spam_score": 0.0,
             }
@@ -58,9 +59,13 @@ class ClassifyResponse(BaseModel):
         default_factory=dict,
         description="Типы токсичности с вероятностями",
     )
-    model_used: Optional[str] = Field(
+    tox_model_used: Optional[str] = Field(
         None,
-        description="Модель, использованная для классификации",
+        description="Модель, использованная для классификации токсичности",
+    )
+    spam_model_used: Optional[str] = Field(
+        None,
+        description="Модель, использованная для классификации спама",
     )
     is_spam: bool = Field(
         False,
@@ -113,29 +118,28 @@ class BatchClassifyResponse(BaseModel):
                     {
                         "is_toxic": False,
                         "toxicity_score": 0.0,
-                        "toxicity_types": {}
+                        "toxicity_types": {},
+                        "tox_model_used": "regex",
+                        "spam_model_used": None,
                     },
                     {
                         "is_toxic": True,
                         "toxicity_score": 0.95,
-                        "toxicity_types": {"ебать": 1.0}
+                        "toxicity_types": {"ебать": 1.0},
+                        "tox_model_used": "regex",
+                        "spam_model_used": "tfidf",
                     }
                 ],
                 "total": 2,
-                "model_used": "regex"
             }
         }
     )
-    
+
     results: List[ClassifyResponse] = Field(
         ...,
-        description="Результаты классификации для каждого текста"
+        description="Результаты классификации для каждого текста",
     )
     total: int = Field(..., description="Общее количество обработанных текстов")
-    model_used: Optional[str] = Field(
-        None,
-        description="Модель, использованная для классификации"
-    )
 
 
 class HealthResponse(BaseModel):
@@ -170,6 +174,11 @@ class BatchAsyncRequest(BaseModel):
     source: Optional[str] = Field(None, description="Источник запроса (web, telegram, …)")
     user_id: Optional[int] = Field(None, description="Идентификатор отправителя (например Telegram user id)")
     preferred_model: Optional[str] = Field(None, description="Предпочтительная модель")
+
+
+class ClassifySubmitResponse(BaseModel):
+    """Ответ при постановке задачи в очередь (одиночный или батч): только task_id для polling."""
+    task_id: str = Field(..., description="Идентификатор задачи; результат получать по GET /tasks/{task_id}")
 
 
 class BatchAsyncResponse(BaseModel):

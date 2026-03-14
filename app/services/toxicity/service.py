@@ -22,7 +22,7 @@ _EMPTY: Dict[str, Any] = {
     "is_toxic": False,
     "toxicity_score": 0.0,
     "toxicity_types": {},
-    "model_used": None,
+    "tox_model_used": None,
 }
 
 
@@ -44,7 +44,12 @@ class ToxicityService:
     def _regex_prefilter(self, text: str) -> Optional[Dict[str, Any]]:
         """Возвращает результат, если regex нашёл токсичность, иначе None."""
         regex_model = self.model_manager.models.get("regex")
-        if regex_model is None or not regex_model.is_loaded:
+        if regex_model is None or not getattr(regex_model, "is_loaded", False):
+            logger.debug(
+                "Toxicity regex pre-filter skipped (single): regex_model=%s is_loaded=%s",
+                regex_model is not None,
+                getattr(regex_model, "is_loaded", False) if regex_model else False,
+            )
             return None
         try:
             result = regex_model.predict(text)
@@ -53,7 +58,8 @@ class ToxicityService:
             return None
         if result.get("is_toxic"):
             result = dict(result)
-            result["model_used"] = "regex"
+            result["tox_model_used"] = "regex"
+            logger.info("Toxicity prediction by model 'regex' (pre-filter)")
             return result
         return None
 
@@ -79,15 +85,15 @@ class ToxicityService:
         regex_hit = self._regex_prefilter(text)
         if regex_hit:
             if use_cache and self._cache:
-                self._cache.set_cached_result(text, regex_hit, model_used="regex")
+                self._cache.set_cached_result(text, regex_hit, tox_model_used="regex")
             return regex_hit
 
         # Stage 2: ML-модель с fallback-цепочкой
         try:
             result = self.model_manager.predict_with_fallback(text, preferred_model)
-            if use_cache and self._cache and result.get("model_used") is not None:
+            if use_cache and self._cache and result.get("tox_model_used") is not None:
                 self._cache.set_cached_result(
-                    text, result, model_used=result.get("model_used")
+                    text, result, tox_model_used=result.get("tox_model_used")
                 )
             return result
         except Exception as e:
@@ -128,6 +134,12 @@ class ToxicityService:
         ml_texts: List[str] = []
 
         regex_model = self.model_manager.models.get("regex")
+        if not regex_model or not getattr(regex_model, "is_loaded", False):
+            logger.warning(
+                "Toxicity regex pre-filter skipped: regex_model=%s is_loaded=%s",
+                regex_model is not None,
+                getattr(regex_model, "is_loaded", False) if regex_model else False,
+            )
         if regex_model and regex_model.is_loaded:
             try:
                 regex_results = regex_model.predict_batch(miss_texts)
@@ -135,17 +147,25 @@ class ToxicityService:
                 logger.debug("Regex pre-filter batch error: %s", e)
                 regex_results = [None] * len(miss_texts)
 
+            regex_hits = 0
             for j, (idx, text) in enumerate(zip(miss_indices, miss_texts)):
                 r = regex_results[j] if regex_results[j] is not None else {}
                 if r.get("is_toxic"):
                     r = dict(r)
-                    r["model_used"] = "regex"
+                    r["tox_model_used"] = "regex"
                     results[idx] = r
+                    regex_hits += 1
                     if use_cache and self._cache:
-                        self._cache.set_cached_result(text, r, model_used="regex")
+                        self._cache.set_cached_result(text, r, tox_model_used="regex")
                 else:
                     ml_indices.append(idx)
                     ml_texts.append(text)
+            if regex_hits:
+                logger.info(
+                    "Toxicity batch: regex pre-filter matched %d of %d texts",
+                    regex_hits,
+                    len(miss_texts),
+                )
         else:
             ml_indices = miss_indices
             ml_texts = miss_texts
@@ -160,11 +180,11 @@ class ToxicityService:
             model_name = getattr(model, "model_name", None)
             for j, r in enumerate(batch_results):
                 r = dict(r)
-                r["model_used"] = r.get("model_used") or model_name
+                r["tox_model_used"] = r.get("tox_model_used") or model_name
                 results[ml_indices[j]] = r
                 if use_cache and self._cache and j < len(ml_texts):
                     self._cache.set_cached_result(
-                        ml_texts[j], r, model_used=r.get("model_used")
+                        ml_texts[j], r, tox_model_used=r.get("tox_model_used")
                     )
         except Exception as e:
             logger.error("Toxicity batch (ML) failed: %s", e)

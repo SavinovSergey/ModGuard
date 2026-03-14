@@ -21,12 +21,16 @@ _DEFAULT_SPAM = {"is_spam": False, "spam_score": 0.0}
 
 
 def _ensure_spam_fields(r: Dict[str, Any]) -> Dict[str, Any]:
-    """Добавляет поля спама в результат, если их нет (обратная совместимость)."""
+    """Добавляет поля спама и tox_model_used/spam_model_used в результат, если их нет."""
     out = dict(r)
     if "is_spam" not in out:
         out["is_spam"] = False
     if "spam_score" not in out:
         out["spam_score"] = 0.0
+    if "tox_model_used" not in out:
+        out["tox_model_used"] = None
+    if "spam_model_used" not in out:
+        out["spam_model_used"] = None
     return out
 
 
@@ -35,6 +39,8 @@ def _merge_toxicity_spam(tox: Dict[str, Any], spam: Dict[str, Any]) -> Dict[str,
     out = dict(tox)
     out["is_spam"] = spam.get("is_spam", False)
     out["spam_score"] = float(spam.get("spam_score", 0.0))
+    out["tox_model_used"] = tox.get("tox_model_used")
+    out["spam_model_used"] = spam.get("spam_model_used")
     return out
 
 
@@ -66,7 +72,8 @@ class ClassificationService:
                 "is_toxic": False,
                 "toxicity_score": 0.0,
                 "toxicity_types": {},
-                "model_used": None,
+                "tox_model_used": None,
+                "spam_model_used": None,
                 "is_spam": False,
                 "spam_score": 0.0,
             }
@@ -84,8 +91,10 @@ class ClassificationService:
         tox = f_tox.result()
         spam = f_spam.result()
         merged = _merge_toxicity_spam(tox, spam)
-        if self._cache and merged.get("model_used"):
-            self._cache.set_cached_result(text, merged, model_used=merged.get("model_used"))
+        if self._cache and (merged.get("tox_model_used") or merged.get("spam_model_used")):
+            self._cache.set_cached_result(
+                text, merged, tox_model_used=merged.get("tox_model_used")
+            )
         return merged
 
     def classify_batch(
@@ -106,7 +115,8 @@ class ClassificationService:
                     "is_toxic": False,
                     "toxicity_score": 0.0,
                     "toxicity_types": {},
-                    "model_used": None,
+                    "tox_model_used": None,
+                    "spam_model_used": None,
                     "is_spam": False,
                     "spam_score": 0.0,
                 }
@@ -136,7 +146,7 @@ class ClassificationService:
             results[idx] = merged
             if self._cache and miss_texts[k]:
                 self._cache.set_cached_result(
-                    miss_texts[k], merged, model_used=merged.get("model_used")
+                    miss_texts[k], merged, tox_model_used=merged.get("tox_model_used")
                 )
         return results
 

@@ -156,7 +156,6 @@ class ModelManager:
                 start_time = time.time()
                 result = model.predict(text)
                 elapsed = time.time() - start_time
-                logger.info(model_name)
                 if elapsed > timeout:
                     logger.warning(
                         f"Model {model_name} exceeded timeout "
@@ -167,11 +166,13 @@ class ModelManager:
                 
                 # Успешное предсказание
                 stats["success"] += 1
-                logger.debug(
-                    f"Successfully predicted with {model_name} in {elapsed:.3f}s"
+                logger.info(
+                    "Toxicity prediction by model '%s' in %.3fs",
+                    model_name,
+                    elapsed,
                 )
                 result = dict(result)
-                result["model_used"] = model_name
+                result["tox_model_used"] = model_name
                 return result
                 
             except Exception as e:

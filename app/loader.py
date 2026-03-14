@@ -43,7 +43,9 @@ def register_all_models(model_manager: ModelManager) -> None:
     from app.models.toxicity.regex_model import RegexModel
 
     regex_model = RegexModel()
+    regex_model.load()
     model_manager.register_model("regex", regex_model)
+    logger.info("Regex toxicity model registered and loaded")
 
     try:
         from app.models.toxicity.tfidf_model import TfidfModel

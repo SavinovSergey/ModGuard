@@ -24,8 +24,9 @@ def _cache_key(text: str) -> str:
     return f"{CACHE_KEY_PREFIX}{h}"
 
 
-def _ttl_seconds(model_used: Optional[str]) -> int:
-    if model_used == "regex":
+def _ttl_seconds(tox_model_used: Optional[str]) -> int:
+    """TTL кэша: короткий для regex-токсичности, иначе стандартный."""
+    if tox_model_used == "regex":
         return settings.cache_ttl_regex_seconds
     return settings.cache_ttl_seconds
 
@@ -50,7 +51,8 @@ class ModerationCache:
                 "is_toxic": data.get("is_toxic", False),
                 "toxicity_score": float(data.get("toxicity_score", 0.0)),
                 "toxicity_types": data.get("toxicity_types") or {},
-                "model_used": data.get("model_used"),
+                "tox_model_used": data.get("tox_model_used"),
+                "spam_model_used": data.get("spam_model_used"),
             }
             if "is_spam" in data:
                 out["is_spam"] = data.get("is_spam", False)
@@ -64,18 +66,19 @@ class ModerationCache:
         self,
         text: str,
         result: Dict[str, Any],
-        model_used: Optional[str] = None,
+        tox_model_used: Optional[str] = None,
     ) -> None:
-        """Сохраняет результат в кэш. TTL зависит от model_used (regex — короче)."""
+        """Сохраняет результат в кэш. TTL зависит от tox_model_used (regex — короче)."""
         if not self._redis or not text:
             return
-        model = model_used or result.get("model_used")
-        ttl = _ttl_seconds(model)
+        tox = tox_model_used or result.get("tox_model_used")
+        ttl = _ttl_seconds(tox)
         payload = {
             "is_toxic": result.get("is_toxic", False),
             "toxicity_score": result.get("toxicity_score", 0.0),
             "toxicity_types": result.get("toxicity_types") or {},
-            "model_used": model,
+            "tox_model_used": tox,
+            "spam_model_used": result.get("spam_model_used"),
         }
         if "is_spam" in result:
             payload["is_spam"] = result.get("is_spam", False)

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_EMPTY: Dict[str, Any] = {"is_spam": False, "spam_score": 0.0}
+_EMPTY: Dict[str, Any] = {"is_spam": False, "spam_score": 0.0, "spam_model_used": None}
 
 
 class SpamService:
@@ -43,6 +43,9 @@ class SpamService:
             logger.debug("Spam regex pre-filter error: %s", e)
             return None
         if result.get("is_spam"):
+            result = dict(result)
+            result["spam_model_used"] = "regex"
+            logger.info("Spam prediction by model 'regex' (pre-filter)")
             return result
         return None
 
@@ -62,7 +65,11 @@ class SpamService:
         # Stage 2: TF-IDF
         if self._spam_model and self._spam_model.is_loaded:
             try:
-                return self._spam_model.predict(text)
+                result = self._spam_model.predict(text)
+                result = dict(result)
+                result["spam_model_used"] = result.get("spam_model_used") or "tfidf"
+                logger.info("Spam prediction by model 'tfidf'")
+                return result
             except Exception as e:
                 logger.warning("Spam classify failed: %s", e)
 
@@ -86,15 +93,25 @@ class SpamService:
                 logger.debug("Spam regex pre-filter batch error: %s", e)
                 regex_results = [None] * n
 
+            regex_hits = 0
             for i, text in enumerate(texts):
                 if not text:
                     continue
                 r = regex_results[i] if regex_results[i] is not None else {}
                 if r.get("is_spam"):
+                    r = dict(r)
+                    r["spam_model_used"] = "regex"
                     results[i] = r
+                    regex_hits += 1
                 else:
                     ml_indices.append(i)
                     ml_texts.append(text)
+            if regex_hits:
+                logger.info(
+                    "Spam batch: regex pre-filter matched %d of %d texts",
+                    regex_hits,
+                    len(texts),
+                )
         else:
             for i, text in enumerate(texts):
                 if text:
@@ -109,7 +126,13 @@ class SpamService:
             try:
                 batch_results = self._spam_model.predict_batch(ml_texts)
                 for j, idx in enumerate(ml_indices):
-                    results[idx] = batch_results[j]
+                    r = dict(batch_results[j])
+                    r["spam_model_used"] = r.get("spam_model_used") or "tfidf"
+                    results[idx] = r
+                logger.info(
+                    "Spam batch: TF-IDF classified %d texts",
+                    len(ml_texts),
+                )
             except Exception as e:
                 logger.warning("Spam batch (TF-IDF) failed: %s", e)
 
