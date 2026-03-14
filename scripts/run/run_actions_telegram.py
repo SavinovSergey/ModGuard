@@ -6,6 +6,7 @@ Actions Telegram: потребляет очередь moderation.results,
 import logging
 import os
 import sys
+import time
 import requests
 
 
@@ -17,6 +18,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logging.getLogger("pika").setLevel(logging.WARNING)
+logging.getLogger("pika.adapters").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
@@ -31,7 +34,12 @@ def delete_message(chat_id: int, message_id: int, token: str) -> bool:
             timeout=10,
         )
         if not r.ok:
-            logger.warning("deleteMessage failed: %s %s", r.status_code, r.text)
+            err = r.text
+            logger.warning(
+                "deleteMessage failed: %s %s. Убедитесь, что бот добавлен в группу как администратор с правом «Удаление сообщений».",
+                r.status_code,
+                err,
+            )
             return False
         return True
     except Exception as e:
@@ -53,27 +61,43 @@ def main():
 
 
     def on_result(body: dict):
+        task_id = body.get("task_id", "?")
         source = body.get("source")
+        # Логируем каждое входящее сообщение из очереди результатов (диагностика)
+        logger.info("Received result: task_id=%s source=%s", task_id, source)
         if source != "telegram":
             return
         results = body.get("results") or []
+        logger.info("Result task_id=%s source=telegram items=%d", task_id, len(results))
         for item in results:
             ref = item.get("ref")
             if not ref or "chat_id" not in ref or "message_id" not in ref:
+                logger.warning("Skip item: ref missing or invalid (ref=%s)", ref)
                 continue
             chat_id = ref["chat_id"]
             message_id = ref["message_id"]
             is_toxic = item.get("is_toxic", False)
             is_spam = item.get("is_spam", False)
-            # Политика: токсичное или спам — удаляем сообщение
             if is_toxic or is_spam:
-                if delete_message(chat_id, message_id):
-                    logger.info("Deleted message %s in chat %s (toxic=%s spam=%s)", message_id, chat_id, is_toxic, is_spam)
+                logger.info("Action: delete msg_id=%s chat_id=%s (is_toxic=%s is_spam=%s)", message_id, chat_id, is_toxic, is_spam)
+                if delete_message(chat_id, message_id, token):
+                    logger.info("Deleted message %s in chat %s", message_id, chat_id)
                 else:
                     logger.warning("Could not delete message %s in chat %s", message_id, chat_id)
+            else:
+                logger.info("Skip: not toxic/spam (is_toxic=%s is_spam=%s) msg_id=%s — модель не пометила как нарушение", is_toxic, is_spam, message_id)
 
-    logger.info("Telegram actions started, consuming results...")
-    consume_results(on_result)
+    logger.info("Telegram actions started, connecting to RabbitMQ...")
+    while True:
+        try:
+            consume_results(on_result)
+        except Exception as e:
+            errname = type(e).__name__
+            if errname == "AMQPConnectionError" or "Connection refused" in str(e).lower():
+                logger.warning("RabbitMQ connection failed (retry in 5s): %s", e)
+            else:
+                logger.exception("Consume error: %s", e)
+            time.sleep(5)
 
 
 if __name__ == "__main__":

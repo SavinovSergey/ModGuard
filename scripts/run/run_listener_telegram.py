@@ -17,6 +17,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logging.getLogger("pika").setLevel(logging.WARNING)
+logging.getLogger("pika.adapters").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
@@ -65,7 +67,9 @@ def process_updates(updates: list, offset: int, cache, token: str, database_url:
             if database_url:
                 create_task_pg(task_id, items, source=source, user_id=user_id)
                 set_task_result_pg(task_id, [cached], status="completed", from_cache=True)
-            publish_task_result(task_id, source, [cached])
+            # Передаём ref в результат, чтобы actions-telegram мог удалить сообщение при необходимости
+            result_with_ref = {**cached, "ref": ref}
+            publish_task_result(task_id, source, [result_with_ref])
             logger.debug("Task %s from cache", task_id)
         else:
             if database_url:
@@ -85,6 +89,7 @@ def run_listener_loop(token: str, cache, database_url: str | None) -> None:
 
     url_get = TELEGRAM_API.format(token=token, method="getUpdates")
     offset = 0
+    last_alive_log = 0.0
     logger.info("Telegram listener started, long polling...")
 
     while True:
@@ -102,6 +107,10 @@ def run_listener_loop(token: str, cache, database_url: str | None) -> None:
                 continue
             updates = data.get("result") or []
             offset = process_updates(updates, offset, cache, token, database_url)
+            # Раз в минуту пишем в лог, что listener жив (если нет сообщений — в логах иначе пусто)
+            if not updates and time.time() - last_alive_log >= 60:
+                logger.info("Listener alive, waiting for messages (offset=%s). If no messages in groups: disable Privacy Mode in BotFather -> /setprivacy -> your bot -> Disable.", offset)
+                last_alive_log = time.time()
         except requests.RequestException as e:
             logger.warning("Telegram request error: %s", e)
             time.sleep(5)
@@ -122,6 +131,7 @@ def main():
         logger.error("RABBITMQ_URL is not set")
         sys.exit(1)
 
+    logger.info("Starting listener (token set, rabbitmq required). In groups, disable bot Privacy Mode in BotFather so the bot receives all messages.")
     cache = create_cache(redis_url=settings.redis_url)
     if settings.database_url:
         init_db()
