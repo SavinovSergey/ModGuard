@@ -477,7 +477,7 @@ def test_bert_pytorch_vs_onnx_similar_output(bert_model_pytorch, bert_model_onnx
         "спасибо за помощь",
         "очень полезная информация",
     ]
-    tolerance = 0.5  # допуск на разницу из-за квантизации
+    tolerance = 0.05  # допуск на разницу из-за квантизации
 
     for text in test_texts:
         pt_result = bert_model_pytorch.predict(text)

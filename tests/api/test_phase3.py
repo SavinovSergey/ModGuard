@@ -1,4 +1,6 @@
-"""Тесты Фазы 3: параллельная токсичность+спам, поля is_spam/spam_score в ответе, кэш."""
+"""Тесты Фазы 3: поля is_spam/spam_score в ответе GET /tasks (и в ClassificationService)."""
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,28 +9,14 @@ from app.core.model_manager import ModelManager
 from app.core.cache import NoOpModerationCache
 from app.services.classification import ClassificationService
 from app.models.toxicity.regex_model import RegexModel
-from app.api.routes import get_classification_service, get_model_manager, get_task_store
+from app.api.routes import get_task_store
 from app.core.task_store import TaskStore
 
 
 @pytest.fixture
 def client_phase3():
-    """Клиент с ClassificationService (токсичность + спам, без реальной модели спама)."""
-    test_model_manager = ModelManager()
-    regex_model = RegexModel()
-    regex_model.load()
-    test_model_manager.register_model("regex", regex_model)
-    test_model_manager.set_current_model("regex")
-    cache = NoOpModerationCache()
-    test_classification_service = ClassificationService(
-        test_model_manager,
-        moderation_cache=cache,
-        spam_model=None,
-    )
+    """Клиент с task_store (API только очередь + GET /tasks)."""
     store = TaskStore(None)
-
-    app.dependency_overrides[get_classification_service] = lambda: test_classification_service
-    app.dependency_overrides[get_model_manager] = lambda: test_model_manager
     app.dependency_overrides[get_task_store] = lambda: store
 
     with TestClient(app) as client:
@@ -37,26 +25,74 @@ def client_phase3():
 
 
 def test_classify_response_has_spam_fields(client_phase3: TestClient):
-    """Ответ /classify содержит is_spam и spam_score."""
-    response = client_phase3.post(
-        "/api/v1/classify",
-        json={"text": "нормальный комментарий"},
-    )
+    """GET /tasks/{task_id} с completed результатом содержит is_spam и spam_score."""
+    mock_result = {
+        "status": "completed",
+        "results": [
+            {
+                "is_toxic": False,
+                "toxicity_score": 0.0,
+                "toxicity_types": {},
+                "tox_model_used": "regex",
+                "spam_model_used": None,
+                "is_spam": False,
+                "spam_score": 0.0,
+            }
+        ],
+        "error": None,
+    }
+    with patch("app.api.routes.settings") as m:
+        m.rabbitmq_url = "amqp://x"
+        m.database_url = "postgres://x"
+        m.max_batch_size = 1000
+        with patch("app.api.routes.create_task_pg"):
+            with patch("app.api.routes.publish_task_request"):
+                resp = client_phase3.post(
+                    "/api/v1/classify",
+                    json={"text": "нормальный комментарий"},
+                )
+    assert resp.status_code == 200
+    task_id = resp.json()["task_id"]
+
+    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+        response = client_phase3.get(f"/api/v1/tasks/{task_id}")
     assert response.status_code == 200
     data = response.json()
-    assert "is_toxic" in data
-    assert "is_spam" in data
-    assert "spam_score" in data
-    assert data["is_spam"] is False
-    assert data["spam_score"] == 0.0
+    assert data["results"] is not None
+    assert len(data["results"]) == 1
+    r = data["results"][0]
+    assert "is_toxic" in r
+    assert "is_spam" in r
+    assert "spam_score" in r
+    assert r["is_spam"] is False
+    assert r["spam_score"] == 0.0
 
 
 def test_classify_batch_response_has_spam_fields(client_phase3: TestClient):
-    """Ответ /classify/batch содержит is_spam и spam_score в каждом элементе."""
-    response = client_phase3.post(
-        "/api/v1/classify/batch",
-        json={"texts": ["текст один", "ебать второй"]},
-    )
+    """GET /tasks/{task_id} для батча содержит is_spam и spam_score в каждом элементе."""
+    mock_result = {
+        "status": "completed",
+        "results": [
+            {"is_toxic": False, "toxicity_score": 0.0, "toxicity_types": {}, "tox_model_used": "regex", "spam_model_used": None, "is_spam": False, "spam_score": 0.0},
+            {"is_toxic": True, "toxicity_score": 0.9, "toxicity_types": {}, "tox_model_used": "regex", "spam_model_used": None, "is_spam": False, "spam_score": 0.0},
+        ],
+        "error": None,
+    }
+    with patch("app.api.routes.settings") as m:
+        m.rabbitmq_url = "amqp://x"
+        m.database_url = "postgres://x"
+        m.max_batch_size = 1000
+        with patch("app.api.routes.create_task_pg"):
+            with patch("app.api.routes.publish_task_request"):
+                resp = client_phase3.post(
+                    "/api/v1/classify/batch",
+                    json={"texts": ["текст один", "ебать второй"]},
+                )
+    assert resp.status_code == 200
+    task_id = resp.json()["task_id"]
+
+    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+        response = client_phase3.get(f"/api/v1/tasks/{task_id}")
     assert response.status_code == 200
     data = response.json()
     assert "results" in data

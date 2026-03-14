@@ -51,7 +51,7 @@ def test_set_result_and_get_task_completed(database_url, task_id):
     items = [{"id": "1", "text": "a"}]
     create_task_pg(task_id, items)
     results = [
-        {"is_toxic": False, "toxicity_score": 0.1, "toxicity_types": {}, "model_used": "regex"},
+        {"is_toxic": False, "toxicity_score": 0.1, "toxicity_types": {}, "tox_model_used": "regex", "spam_model_used": None},
     ]
     set_task_result_pg(task_id, results, status="completed")
     data = get_task_pg(task_id)
