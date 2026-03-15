@@ -106,7 +106,6 @@ class BERTModelTrainer:
         no_freeze: bool = True,
         freeze_encoder: bool = True,
         freeze_last_n_layers: int = 0,
-        dropout: float = 0.1,
         device: Optional[str] = None,
         loss_type: str = 'bce',
         focal_gamma: Optional[float] = 2,
@@ -132,7 +131,6 @@ class BERTModelTrainer:
             no_freeze: Не замораживать модель вовсе
             freeze_encoder: Замораживать ли энкодер (кроме последнего слоя)
             freeze_last_n_layers: Количество последних слоев для заморозки (0 = разморозить только последний)
-            dropout: Dropout для классификационной головы
             device: Устройство для вычислений
             focal_gamma: Приоритет положительному классу
             focal_alpha: Параметр alpha для Focal Loss (если None и focal_auto_alpha=True, считается автоматически)
@@ -155,7 +153,6 @@ class BERTModelTrainer:
         self.no_freeze = no_freeze
         self.freeze_encoder = freeze_encoder
         self.freeze_last_n_layers = freeze_last_n_layers
-        self.dropout = dropout
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.max_grad_norm = max_grad_norm
         self.random_state = random_state
@@ -251,12 +248,10 @@ class BERTModelTrainer:
                 print(f"  Заморожено слоев: {layers_to_freeze}")
                 print(f"  Обучаемых слоев: {num_layers - layers_to_freeze}")
         
-        # Заменяем классификатор на наш с dropout
+        # Заменяем классификатор на одну линейную голову (hidden_size -> 1)
         hidden_size = self.model.config.hidden_size
-        self.model.classifier = nn.Sequential(
-            nn.Dropout(self.dropout),
-            nn.Linear(hidden_size, 1)
-        )
+        self.model.config.num_labels = 1
+        self.model.classifier = nn.Linear(hidden_size, 1)
         
         # Переносим модель на устройство
         self.model = self.model.to(self.device)
@@ -632,7 +627,6 @@ class BERTModelTrainer:
             'max_grad_norm': self.max_grad_norm,
             'freeze_encoder': self.freeze_encoder,
             'freeze_last_n_layers': self.freeze_last_n_layers,
-            'dropout': self.dropout,
             'best_score': self.best_score,
             'best_score_metric': 'average_precision',
             'optimal_threshold': self.optimal_threshold,
@@ -754,12 +748,6 @@ def main():
         default=0,
         help='Количество последних слоев для заморозки (0 = разморозить только последний слой)'
     )
-    parser.add_argument(
-        '--dropout',
-        type=float,
-        default=0.1,
-        help='Dropout для классификационной головы'
-    )
     add_common_random_state_arg(parser)
     add_common_loss_args(parser)
     parser.set_defaults(focal_auto_alpha=True)
@@ -806,7 +794,6 @@ def main():
         no_freeze=args.no_freeze,
         freeze_encoder=args.freeze_encoder,
         freeze_last_n_layers=args.freeze_last_n_layers,
-        dropout=args.dropout,
         loss_type=args.loss_type,
         focal_gamma=args.focal_gamma,
         focal_alpha=args.focal_alpha,
