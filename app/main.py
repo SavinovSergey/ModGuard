@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse
 
 from app.core.config import settings
 from app.core.task_store import TaskStore
+from app.core.cache import ModerationCache, NoOpModerationCache
 from app.core.db import init_db
 from app.api.routes import router
 
@@ -38,14 +39,17 @@ async def lifespan(app: FastAPI):
             _redis_client = redis.from_url(settings.redis_url, decode_responses=True)
             _redis_client.ping()
             task_store = TaskStore(_redis_client)
-            logger.info("Redis connected, task_store enabled")
+            app.state.moderation_cache = ModerationCache(_redis_client)
+            logger.info("Redis connected, task_store and moderation_cache enabled")
         except Exception as e:
             logger.warning("Redis connection failed: %s, using in-memory fallback", e)
             _redis_client = None
             task_store = TaskStore(None)
+            app.state.moderation_cache = NoOpModerationCache()
     else:
         _redis_client = None
         task_store = TaskStore(None)
+        app.state.moderation_cache = NoOpModerationCache()
 
     if settings.database_url:
         init_db()
