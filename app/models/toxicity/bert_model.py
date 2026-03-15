@@ -6,22 +6,11 @@ from typing import List, Dict, Any, Optional, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
-from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from app.models.base import NeuralTextModelBase
 
 logger = logging.getLogger(__name__)
-
-
-def _load_state_dict_from_dir(model_dir: Path) -> Dict[str, torch.Tensor]:
-    """Загружает state_dict из директории (pytorch_model.bin или model.safetensors)."""
-    if (model_dir / "model.safetensors").exists():
-        from safetensors.torch import load_file
-        return load_file(model_dir / "model.safetensors")
-    if (model_dir / "pytorch_model.bin").exists():
-        return torch.load(model_dir / "pytorch_model.bin", map_location="cpu")
-    raise FileNotFoundError(f"Не найден pytorch_model.bin или model.safetensors в {model_dir}")
 
 # Имена ONNX файлов (квантизированная версия имеет приоритет)
 _ONNX_FILES = ("model_quantized.onnx", "model.onnx")
@@ -214,24 +203,9 @@ class BERTModel(NeuralTextModelBase):
                 self._is_onnx = True  # фиксируется при загрузке, не меняется при predict/predict_batch
                 self._num_labels = getattr(self.model.config, "num_labels", 1)
             else:
-                # Загружаем PyTorch модель
+                # Загружаем PyTorch модель (голова — один Linear, classifier.weight/bias)
                 logger.info(f"Загрузка PyTorch модели из {model_path}...")
-                # При обучении (train_bert.py) классификатор заменён на Sequential(Dropout, Linear),
-                # в чекпоинте — classifier.1.weight/bias. У стандартной модели — classifier.weight/bias.
-                # Сначала смотрим state_dict: если там кастомная голова — собираем модель под неё и грузим веса.
-                state_dict = _load_state_dict_from_dir(model_dir)
-                if "classifier.1.weight" in state_dict:
-                    dropout = float(self.model_params.get("dropout", 0.1))
-                    config = AutoConfig.from_pretrained(model_path)
-                    self.model = AutoModelForSequenceClassification.from_config(config)
-                    self.model.classifier = nn.Sequential(
-                        nn.Dropout(p=dropout),
-                        nn.Linear(config.hidden_size, 1),
-                    )
-                    self.model.load_state_dict(state_dict, strict=True)
-                    logger.info("Загружена голова классификатора (Dropout + Linear) из чекпоинта обучения.")
-                else:
-                    self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
+                self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
                 self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path or model_path)
                 self._is_onnx = False
                 self.model = self.model.to(self.device)
@@ -322,7 +296,8 @@ class BERTModel(NeuralTextModelBase):
 
     def predict_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
         """
-        Предсказывает токсичность для батча текстов
+        Предсказывает токсичность для батча текстов.
+        Большой батч обрабатывается мини-батчами по self.batch_size (по умолчанию 32) для экономии памяти.
         """
         self.ensure_loaded()
 
@@ -339,36 +314,46 @@ class BERTModel(NeuralTextModelBase):
 
         non_empty_texts = [processed_texts[i] for i in non_empty_indices]
 
-        # Токенизация батча
-        encoding = self.tokenizer(
-            non_empty_texts,
-            truncation=True,
-            padding=True,
-            max_length=self.max_length,
-            return_tensors='pt'
-        )
-        
-        if self._is_onnx:
-            # Для ONNX модели передаем данные напрямую из токенизатора (numpy массивы)
-            outputs = self.model(
-                input_ids=encoding['input_ids'].cpu().numpy(),
-                attention_mask=encoding['attention_mask'].cpu().numpy(),
+        # Сортируем по длине (убывание): в мини-батче меньше паддинга, быстрее инференс
+        sort_idx = sorted(range(len(non_empty_texts)), key=lambda i: len(non_empty_texts[i]), reverse=True)
+        non_empty_texts = [non_empty_texts[i] for i in sort_idx]
+        inv_sort = [0] * len(sort_idx)
+        for k, orig in enumerate(sort_idx):
+            inv_sort[orig] = k
+
+        # Обрабатываем мини-батчами (по self.batch_size, по умолчанию 32) для экономии памяти
+        chunk_size = self.batch_size
+        all_toxicity_scores = []
+        for start in range(0, len(non_empty_texts), chunk_size):
+            chunk_texts = non_empty_texts[start : start + chunk_size]
+            encoding = self.tokenizer(
+                chunk_texts,
+                truncation=True,
+                padding=True,
+                max_length=self.max_length,
+                return_tensors='pt'
             )
-            # ONNX модель может возвращать logits напрямую или в виде объекта с атрибутом logits
-            if hasattr(outputs, 'logits'):
-                logits = outputs.logits
+            if self._is_onnx:
+                outputs = self.model(
+                    input_ids=encoding['input_ids'].cpu().numpy(),
+                    attention_mask=encoding['attention_mask'].cpu().numpy(),
+                )
+                logits = outputs.logits if hasattr(outputs, 'logits') else outputs
+                chunk_scores = self._logits_to_scores_batch(logits)
             else:
-                # Если outputs - это numpy массив напрямую
-                logits = outputs
-            toxicity_scores = self._logits_to_scores_batch(logits)
-        else:
-            input_ids = encoding['input_ids'].to(self.device)
-            attention_mask = encoding['attention_mask'].to(self.device)
-            with torch.no_grad():
-                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits
-            toxicity_scores = self._logits_to_scores_batch(logits)
-        
+                input_ids = encoding['input_ids'].to(self.device)
+                attention_mask = encoding['attention_mask'].to(self.device)
+                with torch.no_grad():
+                    outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = outputs.logits
+                chunk_scores = self._logits_to_scores_batch(logits)
+            if hasattr(chunk_scores, 'tolist'):
+                all_toxicity_scores.extend(chunk_scores.tolist())
+            else:
+                all_toxicity_scores.extend(list(chunk_scores))
+        # Возвращаем результаты в исходный порядок (как до сортировки по длине)
+        toxicity_scores = [all_toxicity_scores[inv_sort[i]] for i in range(len(inv_sort))]
+
         assert len(toxicity_scores) == len(non_empty_indices), \
             f"toxicity_scores ({len(toxicity_scores)}), валидные тексты ({len(non_empty_indices)})"
         # Формируем окончательные результаты

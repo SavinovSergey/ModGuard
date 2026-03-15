@@ -247,7 +247,8 @@ class RNNModel(NeuralTextModelBase):
 
     def predict_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
         """
-        Предсказывает токсичность для батча текстов
+        Предсказывает токсичность для батча текстов.
+        Большой батч обрабатывается мини-батчами по self.batch_size (по умолчанию 64) для экономии памяти.
         """
         self.ensure_loaded()
 
@@ -264,16 +265,21 @@ class RNNModel(NeuralTextModelBase):
 
         non_empty_texts = [processed_texts[i] for i in non_empty_indices]
 
-        # Токенизация батча
+        # Сортируем по длине (убывание): в мини-батче меньше паддинга, быстрее инференс
+        sort_idx = sorted(range(len(non_empty_texts)), key=lambda i: len(non_empty_texts[i]), reverse=True)
+        non_empty_texts = [non_empty_texts[i] for i in sort_idx]
+        inv_sort = [0] * len(sort_idx)
+        for k, orig in enumerate(sort_idx):
+            inv_sort[orig] = k
+
+        # Токенизация батча (уже в отсортированном порядке)
         token_ids_batch = self.tokenizer.encode_batch(non_empty_texts, max_length=self.max_length)
 
-        # Разбиваем на батчи и обрабатываем напрямую через collate_fn
+        # Обрабатываем мини-батчами (по self.batch_size, по умолчанию 64) для экономии памяти
         pad_token_id = self.tokenizer.get_pad_token_id()
-        
         all_probas = []
         self.model.eval()
         with torch.no_grad():
-            # Обрабатываем батчами
             for i in range(0, len(token_ids_batch), self.batch_size):
                 batch_token_ids = token_ids_batch[i:i + self.batch_size]
                 
@@ -297,7 +303,10 @@ class RNNModel(NeuralTextModelBase):
                 if isinstance(probas, float):
                     probas = [probas]
                 all_probas.extend(probas)
-        
+
+        # Возвращаем результаты в исходный порядок (как до сортировки по длине)
+        all_probas = [all_probas[inv_sort[i]] for i in range(len(inv_sort))]
+
         # Формируем окончательные результаты
         full_results = []
         proba_idx = 0
