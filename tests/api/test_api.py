@@ -151,14 +151,14 @@ def test_classify_empty_text_returns_task_id(client_with_queue):
 
 
 def test_classify_batch_returns_task_id(client_with_queue):
-    """POST /classify/batch ставит батч в очередь и возвращает task_id."""
+    """POST /classify/batch-async ставит батч в очередь и возвращает task_id."""
     response = client_with_queue.post(
-        "/api/v1/classify/batch",
+        "/api/v1/classify/batch-async",
         json={
-            "texts": [
-                "нормальный комментарий",
-                "токсичный ебать комментарий",
-                "спасибо за помощь",
+            "items": [
+                {"text": "нормальный комментарий"},
+                {"text": "токсичный ебать комментарий"},
+                {"text": "спасибо за помощь"},
             ]
         },
     )
@@ -169,7 +169,7 @@ def test_classify_batch_returns_task_id(client_with_queue):
 
 
 def test_classify_batch_then_get_results(client_with_queue):
-    """POST /classify/batch → task_id; GET /tasks возвращает батч результатов."""
+    """POST /classify/batch-async → task_id; GET /tasks возвращает батч результатов."""
     mock_result = {
         "status": "completed",
         "results": [
@@ -181,8 +181,8 @@ def test_classify_batch_then_get_results(client_with_queue):
     }
     with patch("app.api.routes.create_task_pg"):
         resp = client_with_queue.post(
-            "/api/v1/classify/batch",
-            json={"texts": ["a", "b", "c"]},
+            "/api/v1/classify/batch-async",
+            json={"items": [{"text": "a"}, {"text": "b"}, {"text": "c"}]},
         )
     task_id = resp.json()["task_id"]
     with patch("app.api.routes.get_task_pg", return_value=mock_result):
@@ -195,38 +195,38 @@ def test_classify_batch_then_get_results(client_with_queue):
 
 
 def test_classify_batch_with_preferred_model_returns_task_id(client_with_queue):
-    """POST /classify/batch с preferred_model возвращает task_id."""
+    """POST /classify/batch-async с preferred_model возвращает task_id."""
     response = client_with_queue.post(
-        "/api/v1/classify/batch",
-        json={"texts": ["текст 1", "текст 2"], "preferred_model": "regex"},
+        "/api/v1/classify/batch-async",
+        json={"items": [{"text": "текст 1"}, {"text": "текст 2"}], "preferred_model": "regex"},
     )
     assert response.status_code == 200
     assert "task_id" in response.json()
 
 
 def test_classify_batch_empty_list(client):
-    """POST /classify/batch с пустым списком — 422."""
+    """POST /classify/batch-async с пустым items — 422."""
     with patch("app.api.routes.settings") as m:
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
         m.max_batch_size = 1000
         response = client.post(
-            "/api/v1/classify/batch",
-            json={"texts": []},
+            "/api/v1/classify/batch-async",
+            json={"items": []},
         )
     assert response.status_code == 422
 
 
 def test_classify_batch_too_large(client_with_queue):
-    """POST /classify/batch с превышением лимита — 400."""
-    large_texts = [f"текст {i}" for i in range(1001)]
+    """POST /classify/batch-async с превышением лимита — 400."""
+    large_items = [{"text": f"текст {i}"} for i in range(1001)]
     with patch("app.api.routes.settings") as m:
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
         m.max_batch_size = 1000
         response = client_with_queue.post(
-            "/api/v1/classify/batch",
-            json={"texts": large_texts},
+            "/api/v1/classify/batch-async",
+            json={"items": large_items},
         )
     assert response.status_code == 400
     assert "exceeds maximum" in response.json()["detail"].lower()

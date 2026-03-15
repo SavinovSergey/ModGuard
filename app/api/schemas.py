@@ -83,65 +83,6 @@ class ClassifyResponse(BaseModel):
     )
 
 
-class BatchClassifyRequest(BaseModel):
-    """Запрос на batch-классификацию"""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "texts": [
-                    "Это нормальный комментарий",
-                    "Это токсичный комментарий"
-                ],
-                "preferred_model": "regex"
-            }
-        }
-    )
-    
-    texts: List[str] = Field(
-        ..., 
-        min_length=1,
-        # max_length убран, так как проверка выполняется в коде endpoint
-        description="Список текстов для классификации (максимум 1000)"
-    )
-    preferred_model: Optional[str] = Field(
-        None,
-        description="Предпочтительная модель для использования"
-    )
-
-
-class BatchClassifyResponse(BaseModel):
-    """Ответ на batch-запрос"""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "results": [
-                    {
-                        "is_toxic": False,
-                        "toxicity_score": 0.0,
-                        "toxicity_types": {},
-                        "tox_model_used": "regex",
-                        "spam_model_used": None,
-                    },
-                    {
-                        "is_toxic": True,
-                        "toxicity_score": 0.95,
-                        "toxicity_types": {"ебать": 1.0},
-                        "tox_model_used": "regex",
-                        "spam_model_used": "tfidf",
-                    }
-                ],
-                "total": 2,
-            }
-        }
-    )
-
-    results: List[ClassifyResponse] = Field(
-        ...,
-        description="Результаты классификации для каждого текста",
-    )
-    total: int = Field(..., description="Общее количество обработанных текстов")
-
-
 class HealthResponse(BaseModel):
     """Ответ health check"""
     status: str = Field(..., description="Статус сервиса")
@@ -182,8 +123,9 @@ class ClassifySubmitResponse(BaseModel):
 
 
 class BatchAsyncResponse(BaseModel):
-    """Ответ на запрос batch-async: только task_id"""
-    task_id: str = Field(..., description="Идентификатор задачи для polling")
+    """Ответ на запрос batch-async: task_id (первый при частичном кэше) и при частичном кэше — task_ids для всех частей."""
+    task_id: str = Field(..., description="Идентификатор задачи для polling (при частичном кэше — первый из списка)")
+    task_ids: Optional[List[str]] = Field(None, description="При частичном кэше: [task_id кэш-части, task_id очереди]")
 
 
 class TaskStatusResponse(BaseModel):

@@ -45,7 +45,6 @@ class SpamService:
         if result.get("is_spam"):
             result = dict(result)
             result["spam_model_used"] = "regex"
-            logger.info("Spam prediction by model 'regex' (pre-filter)")
             return result
         return None
 
@@ -68,7 +67,6 @@ class SpamService:
                 result = self._spam_model.predict(text)
                 result = dict(result)
                 result["spam_model_used"] = result.get("spam_model_used") or "tfidf"
-                logger.info("Spam prediction by model 'tfidf'")
                 return result
             except Exception as e:
                 logger.warning("Spam classify failed: %s", e)

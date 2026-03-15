@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.core.model_manager import ModelManager
-from app.core.cache import NoOpModerationCache
 from app.services.classification import ClassificationService
 from app.models.toxicity.regex_model import RegexModel
 from app.api.routes import get_task_store
@@ -85,8 +84,8 @@ def test_classify_batch_response_has_spam_fields(client_phase3: TestClient):
         with patch("app.api.routes.create_task_pg"):
             with patch("app.api.routes.publish_task_request"):
                 resp = client_phase3.post(
-                    "/api/v1/classify/batch",
-                    json={"texts": ["текст один", "ебать второй"]},
+                    "/api/v1/classify/batch-async",
+                    json={"items": [{"text": "текст один"}, {"text": "ебать второй"}]},
                 )
     assert resp.status_code == 200
     task_id = resp.json()["task_id"]
@@ -111,7 +110,7 @@ def test_phase3_parallel_merge():
     regex_model.load()
     model_manager.register_model("regex", regex_model)
     model_manager.set_current_model("regex")
-    service = ClassificationService(model_manager, moderation_cache=None, spam_model=None)
+    service = ClassificationService(model_manager, spam_model=None)
     result = service.classify("ебать тест")
     assert result["is_toxic"] is True
     assert result["is_spam"] is False

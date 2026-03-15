@@ -11,7 +11,6 @@ from app.services.toxicity import ToxicityService
 from app.services.spam import SpamService
 
 if TYPE_CHECKING:
-    from app.core.cache import ModerationCache
     from app.models.spam.regex_model import SpamRegexModel
     from app.models.spam.tfidf_model import SpamTfidfModel
 
@@ -50,13 +49,11 @@ class ClassificationService:
     def __init__(
         self,
         model_manager: ModelManager,
-        moderation_cache: Optional["ModerationCache"] = None,
         spam_model: Optional["SpamTfidfModel"] = None,
         spam_regex_model: Optional["SpamRegexModel"] = None,
     ):
         self.model_manager = model_manager
-        self._cache = moderation_cache
-        self._toxicity = ToxicityService(model_manager, moderation_cache)
+        self._toxicity = ToxicityService(model_manager)
         self._spam = SpamService(spam_model=spam_model, spam_regex_model=spam_regex_model)
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="moderation")
 
@@ -66,7 +63,7 @@ class ClassificationService:
         context: Optional[List[str]] = None,
         preferred_model: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Классификация токсичности и спама (параллельно). При попадании в кэш — возврат из кэша."""
+        """Классификация токсичности и спама (параллельно)."""
         if not text:
             return {
                 "is_toxic": False,
@@ -77,25 +74,15 @@ class ClassificationService:
                 "is_spam": False,
                 "spam_score": 0.0,
             }
-        if self._cache:
-            cached = self._cache.get_cached_result(text)
-            if cached is not None:
-                return _ensure_spam_fields(cached)
         f_tox = self._executor.submit(
             self._toxicity.classify,
             text,
             preferred_model=preferred_model,
-            use_cache=False,
         )
         f_spam = self._executor.submit(self._spam.classify, text)
         tox = f_tox.result()
         spam = f_spam.result()
-        merged = _merge_toxicity_spam(tox, spam)
-        if self._cache and (merged.get("tox_model_used") or merged.get("spam_model_used")):
-            self._cache.set_cached_result(
-                text, merged, tox_model_used=merged.get("tox_model_used")
-            )
-        return merged
+        return _merge_toxicity_spam(tox, spam)
 
     def classify_batch(
         self,
@@ -121,11 +108,6 @@ class ClassificationService:
                     "spam_score": 0.0,
                 }
                 continue
-            if self._cache:
-                cached = self._cache.get_cached_result(text)
-                if cached is not None:
-                    results[i] = _ensure_spam_fields(cached)
-                    continue
             miss_indices.append(i)
             miss_texts.append(text)
         if not miss_texts:
@@ -134,7 +116,6 @@ class ClassificationService:
             self._toxicity.classify_batch,
             miss_texts,
             preferred_model=preferred_model,
-            use_cache=False,
         )
         f_spam = self._executor.submit(self._spam.classify_batch, miss_texts)
         tox_list = f_tox.result()
@@ -142,12 +123,7 @@ class ClassificationService:
         for k, idx in enumerate(miss_indices):
             tox = tox_list[k] if k < len(tox_list) else {}
             spam = spam_list[k] if k < len(spam_list) else _DEFAULT_SPAM
-            merged = _merge_toxicity_spam(tox, spam)
-            results[idx] = merged
-            if self._cache and miss_texts[k]:
-                self._cache.set_cached_result(
-                    miss_texts[k], merged, tox_model_used=merged.get("tox_model_used")
-                )
+            results[idx] = _merge_toxicity_spam(tox, spam)
         return results
 
     def get_model_info(self) -> Dict[str, Any]:
