@@ -77,13 +77,29 @@ def register_all_models(model_manager: ModelManager) -> None:
         model_path = rnn_dir / "model_quantized.pt"
         if not model_path.exists():
             model_path = rnn_dir / "model.pt"
+        rnn_loaded = False
         if model_path.exists() and tokenizer_path.exists():
             rnn_model = RNNModel()
             rnn_model.load(model_path=str(model_path), tokenizer_path=str(tokenizer_path))
             model_manager.register_model("rnn", rnn_model)
-            logger.info("RNN model registered and loaded")
+            logger.info("RNN model registered and loaded from %s", rnn_dir)
+            rnn_loaded = True
     except Exception as e:
         logger.warning("Could not register RNN model: %s", e)
+
+    if not model_manager.models.get("rnn") and not model_manager.model_stats.get("rnn"):
+        # Локальная загрузка RNN не сработала — пробуем HuggingFace fallback
+        try:
+            from app.core.config import settings as _settings
+
+            hf_name = getattr(_settings, "rnn_hf_model_name", None)
+            if hf_name:
+                rnn_model = RNNModel(hf_model_name=hf_name)
+                rnn_model.load()
+                model_manager.register_model("rnn", rnn_model)
+                logger.info("RNN model registered and loaded from HuggingFace: %s", hf_name)
+        except Exception as e_inner:
+            logger.info("RNN HF load skipped/failed: %s", e_inner)
 
     try:
         from app.models.toxicity.bert_model import BERTModel

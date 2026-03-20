@@ -8,6 +8,8 @@
 Использование:
   1. Отдельный скрипт:
      python scripts/toxicity/quantize_rnn.py models/toxicity/rnn/model.pt models/toxicity/rnn/tokenizer.json -o models/toxicity/rnn
+     # RNN: квантизация из HuggingFace model-id (скачиваются model/tokenizer/params)
+     python scripts/toxicity/quantize_rnn.py SergeySavinov/rurnn-toxicity -o models/toxicity/rnn_from_hf
 
   2. Импорт после обучения:
      from scripts.toxicity.quantize_rnn import quantize_rnn_model
@@ -171,6 +173,64 @@ def quantize_rnn_model(
     return output_dir
 
 
+def quantize_rnn_from_hf(
+    hf_model_id: str,
+    output_dir: Union[str, Path],
+    *,
+    device: str = "cpu",
+    dtype: "torch.dtype" = None,
+) -> Path:
+    """
+    Загружает артефакты RNN модели из HuggingFace (model-id) во временную директорию,
+    затем применяет динамическую квантизацию и сохраняет результат в output_dir.
+
+    Ожидаемые файлы в HF-репозитории (как минимум):
+      - model.pt или model_quantized.pt
+      - tokenizer.json
+      - params.json
+    """
+    import tempfile
+    from huggingface_hub import hf_hub_download
+
+    if dtype is None:
+        dtype = _DEFAULT_QUANTIZE_DTYPE
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="rnn_hf_quant_") as tmp:
+        tmpdir = Path(tmp)
+
+        # model.pt preferred
+        model_src_path = None
+        try:
+            model_src_path = hf_hub_download(repo_id=hf_model_id, filename="model.pt")
+        except Exception:
+            model_src_path = None
+        if model_src_path is None:
+            # fallback to quantized weights (квантизация поверх них может быть бессмысленной,
+            # но код попытается пройти весь pipeline)
+            model_src_path = hf_hub_download(repo_id=hf_model_id, filename="model_quantized.pt")
+
+        # Скачиваем обязательные файлы рядом, чтобы params.json лежал в parent модельного файла
+        model_local_path = tmpdir / "model.pt"
+        shutil.copy2(model_src_path, model_local_path)
+
+        tokenizer_src_path = hf_hub_download(repo_id=hf_model_id, filename="tokenizer.json")
+        shutil.copy2(tokenizer_src_path, tmpdir / "tokenizer.json")
+
+        params_src_path = hf_hub_download(repo_id=hf_model_id, filename="params.json")
+        shutil.copy2(params_src_path, tmpdir / "params.json")
+
+        return quantize_rnn_model(
+            model_path=model_local_path,
+            tokenizer_path=tmpdir / "tokenizer.json",
+            output_dir=output_dir,
+            device=device,
+            dtype=dtype,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Динамическая квантизация RNN модели для классификации токсичности"
@@ -183,6 +243,8 @@ def main():
     parser.add_argument(
         "tokenizer_path",
         type=str,
+        nargs="?",
+        default="",
         help="Путь к файлу токенизатора (.json)",
     )
     parser.add_argument(
@@ -208,32 +270,45 @@ def main():
 
     args = parser.parse_args()
 
-    model_path = Path(args.model_path)
-    tokenizer_path = Path(args.tokenizer_path)
-
-    if not model_path.exists():
-        parser.error(f"Модель не найдена: {model_path}")
-    if not tokenizer_path.exists():
-        parser.error(f"Токенизатор не найден: {tokenizer_path}")
-
-    output_dir = args.output_dir
-    if output_dir is None:
-        output_dir = f"{model_path.parent}_quantized"
-    output_dir = Path(output_dir)
-
     dtype_map = {
         "qint8": torch.qint8,
         "float16": torch.float16,
     }
     dtype = dtype_map[args.dtype]
 
-    quantize_rnn_model(
-        model_path,
-        tokenizer_path,
-        output_dir,
-        device=args.device,
-        dtype=dtype,
-    )
+    model_path_input = args.model_path
+    tokenizer_path_input = args.tokenizer_path
+
+    model_path = Path(model_path_input)
+    tokenizer_path = Path(tokenizer_path_input)
+
+    output_dir = args.output_dir
+    if output_dir is None:
+        if model_path.exists():
+            output_dir = f"{model_path.parent}_quantized"
+        else:
+            safe_id = model_path_input.replace("/", "_")
+            output_dir = f"{safe_id}_quantized"
+    output_dir = Path(output_dir)
+
+    if model_path.exists():
+        if not tokenizer_path.exists():
+            parser.error(f"Токенизатор не найден: {tokenizer_path}")
+        quantize_rnn_model(
+            model_path,
+            tokenizer_path,
+            output_dir,
+            device=args.device,
+            dtype=dtype,
+        )
+    else:
+        # model_path_input не является локальным файлом => предполагаем HF model-id.
+        quantize_rnn_from_hf(
+            model_path_input,
+            output_dir,
+            device=args.device,
+            dtype=dtype,
+        )
 
     print("Готово.")
 

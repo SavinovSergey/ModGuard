@@ -2,6 +2,7 @@
 import json
 import logging
 from pathlib import Path
+import shutil
 from typing import List, Dict, Any, Optional
 
 import torch
@@ -21,6 +22,7 @@ class RNNModel(NeuralTextModelBase):
         self,
         model_path: Optional[str] = None,
         tokenizer_path: Optional[str] = None,
+        hf_model_name: Optional[str] = None,
         tokenizer_type: str = 'bpe',  # 'bpe' or 'rubert'
         rnn_type: str = 'gru',  # 'rnn', 'gru', 'lstm'
         device: Optional[str] = None,
@@ -30,6 +32,7 @@ class RNNModel(NeuralTextModelBase):
         super().__init__(model_name="rnn", model_type="rnn")
         self.model_path = model_path
         self.tokenizer_path = tokenizer_path
+        self.hf_model_name = hf_model_name
         self.tokenizer_type = tokenizer_type
         self.rnn_type = rnn_type
         self.max_length = max_length
@@ -52,11 +55,69 @@ class RNNModel(NeuralTextModelBase):
         """
         model_path = model_path or self.model_path
         tokenizer_path = tokenizer_path or self.tokenizer_path
+        
+        if (model_path is None or tokenizer_path is None) and self.hf_model_name:
+            # HF fallback: скачиваем артефакты модели во временную директорию
+            # и далее загружаем стандартным способом (model_path/tokenizer_path).
+            import tempfile
+            from huggingface_hub import hf_hub_download
+
+            # model_quantized.pt может отсутствовать — он определяется через params.json и наличие файла
+            optional_files = {"model_quantized.pt": "model_quantized.pt"}
+
+            with tempfile.TemporaryDirectory(prefix="rnn_hf_") as tmp:
+                tmpdir = Path(tmp)
+
+                # model.pt (required)
+                model_file = None
+                model_from_quantized = False
+                try:
+                    model_file = hf_hub_download(
+                        repo_id=self.hf_model_name,
+                        filename="model.pt",
+                    )
+                    model_from_quantized = False
+                except Exception:
+                    model_file = None
+                if model_file is None:
+                    # Если model.pt нет — попробуем model_quantized.pt (хотя для квантизации обычно нужен float-вариант)
+                    try:
+                        model_file = hf_hub_download(
+                            repo_id=self.hf_model_name,
+                            filename="model_quantized.pt",
+                        )
+                        model_from_quantized = True
+                    except Exception as e:
+                        raise FileNotFoundError(f"HF RNN model artifacts not found in {self.hf_model_name}: {e}")
+
+                # Копируем обязательные файлы (в tmpdir, чтобы рядом был params.json)
+                shutil_dest = tmpdir / "model.pt"
+                shutil.copy2(model_file, shutil_dest)
+                if model_from_quantized:
+                    shutil.copy2(model_file, tmpdir / "model_quantized.pt")
+                for fname in ("tokenizer.json", "params.json"):
+                    src = hf_hub_download(repo_id=self.hf_model_name, filename=fname)
+                    shutil.copy2(src, tmpdir / fname)
+
+                # Опционально: модель_quantized.pt
+                for fname, outname in optional_files.items():
+                    try:
+                        src = hf_hub_download(repo_id=self.hf_model_name, filename=fname)
+                        shutil.copy2(src, tmpdir / outname)
+                    except Exception:
+                        pass
+
+                # Теперь вызываем загрузку с локальных путей.
+                self.model_path = str(shutil_dest)
+                self.tokenizer_path = str(tmpdir / "tokenizer.json")
+                self.load(model_path=self.model_path, tokenizer_path=self.tokenizer_path)
+                return
 
         if model_path is None or tokenizer_path is None:
             raise ValueError(
                 "Необходимо указать пути к модели и токенизатору. "
-                "Используйте load(model_path='...', tokenizer_path='...')"
+                "Используйте load(model_path='...', tokenizer_path='...') "
+                "или передайте hf_model_name в конструктор."
             )
 
         # Проверяем существование файлов

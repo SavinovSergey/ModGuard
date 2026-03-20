@@ -75,20 +75,61 @@ def _load_model(model_type: str, model_dir: str | None):
 
     if model_type == "rnn":
         from app.models.toxicity.rnn_model import RNNModel
-        rnn_dir = Path(model_dir or "models/toxicity/rnn")
-        tokenizer_path = rnn_dir / "tokenizer.json"
-        weights_path = rnn_dir / "model_quantized.pt"
-        if not weights_path.exists():
-            weights_path = rnn_dir / "model.pt"
-        if not weights_path.exists():
-            raise FileNotFoundError(f"model.pt / model_quantized.pt не найден в {rnn_dir}")
-        model = RNNModel()
-        model.load(model_path=str(weights_path), tokenizer_path=str(tokenizer_path))
+        maybe_local = Path(model_dir) if model_dir else Path("models/toxicity/rnn")
+
+        # Локальная директория (есть файлы модели) — как раньше
+        if maybe_local.exists() and maybe_local.is_dir():
+            rnn_dir = maybe_local
+            tokenizer_path = rnn_dir / "tokenizer.json"
+            weights_path = rnn_dir / "model_quantized.pt"
+            if not weights_path.exists():
+                weights_path = rnn_dir / "model.pt"
+            if not weights_path.exists():
+                raise FileNotFoundError(f"model.pt / model_quantized.pt не найден в {rnn_dir}")
+            model = RNNModel()
+            model.load(model_path=str(weights_path), tokenizer_path=str(tokenizer_path))
+            return model
+
+        # HF model-id — если локальной папки нет
+        hf_id = model_dir
+        if not hf_id:
+            # Если --model-dir не передан, попробуем взять из окружения/конфига
+            from app.core.config import settings as _settings
+
+            hf_id = getattr(_settings, "rnn_hf_model_name", None)
+        if not hf_id:
+            raise FileNotFoundError(
+                "RNN модель не найдена локально, и HF model-id не задан. "
+                "Передайте --model-dir SergeySavinov/rurnn-toxicity или укажите RNN_HF_MODEL_NAME."
+            )
+
+        model = RNNModel(hf_model_name=hf_id)
+        model.load()
         return model
 
     if model_type == "bert":
         from app.models.toxicity.bert_model import BERTModel
-        bert_dir = Path(model_dir or "models/toxicity/bert")
+        maybe_local = Path(model_dir) if model_dir else Path("models/toxicity/bert")
+
+        # Если --model-dir не существует как локальная папка — считаем его HF model-id.
+        if not maybe_local.exists() or not maybe_local.is_dir():
+            hf_id = model_dir
+            if not hf_id:
+                # Если --model-dir не передан, попробуем взять из конфига
+                from app.core.config import settings as _settings
+
+                hf_id = getattr(_settings, "bert_hf_model_name", None)
+            if not hf_id:
+                raise FileNotFoundError(
+                    "BERT модель не найдена локально, и HF model-id не задан. "
+                    "Передайте --model-dir SergeySavinov/rubert-tiny-toxicity или укажите BERT_HF_MODEL_NAME."
+                )
+            model = BERTModel(model_name=hf_id)
+            model.load()
+            print(f"BERT загружен из HuggingFace: {hf_id}")
+            return model
+
+        bert_dir = maybe_local
         candidates = [bert_dir, bert_dir / "onnx_cpu", bert_dir / "onnx"]
         for d in candidates:
             if d.is_dir():
@@ -99,7 +140,9 @@ def _load_model(model_type: str, model_dir: str | None):
                     return model
                 except Exception as e:
                     print(f"  Не удалось загрузить из {d}: {e}")
-        raise FileNotFoundError(f"BERT модель не найдена (проверялись: {', '.join(str(c) for c in candidates)})")
+        raise FileNotFoundError(
+            f"BERT модель не найдена локально (проверялись: {', '.join(str(c) for c in candidates)})"
+        )
 
     raise ValueError(f"Неизвестный тип модели: {model_type}")
 
@@ -148,7 +191,19 @@ def main() -> None:
     args = parser.parse_args()
 
     model_type = args.model_type
-    output_dir = Path(args.output_dir or args.model_dir or f"models/toxicity/{model_type}")
+
+    # Важно: model_dir может быть HF model-id вида "user/repo", который содержит "/".
+    # Мы не должны использовать его как файловый путь для output_dir.
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    elif args.model_dir:
+        local_dir = Path(args.model_dir)
+        if local_dir.exists() and local_dir.is_dir():
+            output_dir = local_dir
+        else:
+            output_dir = Path(f"models/toxicity/{model_type}")
+    else:
+        output_dir = Path(f"models/toxicity/{model_type}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Загрузка модели '{model_type}'...")
