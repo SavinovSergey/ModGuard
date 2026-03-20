@@ -108,10 +108,10 @@ def test_bert_model_initialization_with_path():
 
 def test_bert_model_initialization_with_model_name():
     """Тест инициализации модели с именем модели"""
-    model = BERTModel(model_name="cointegrated/rubert-tiny2")
+    model = BERTModel(model_name="SergeySavinov/rubert-tiny-toxicity")
     # model_name это тип модели (из BaseToxicityModel), hf_model_name хранит имя из HuggingFace
     assert model.model_name == "bert"
-    assert model.hf_model_name == "cointegrated/rubert-tiny2"
+    assert model.hf_model_name == "SergeySavinov/rubert-tiny-toxicity"
     assert not model.is_loaded
 
 
@@ -331,11 +331,11 @@ def test_bert_model_get_model_info_with_path():
 
 def test_bert_model_get_model_info_with_model_name():
     """Тест получения информации о модели с именем модели"""
-    model = BERTModel(model_name="cointegrated/rubert-tiny2")
+    model = BERTModel(model_name="SergeySavinov/rubert-tiny-toxicity")
     info = model.get_model_info()
     
     # hf_model_name хранится как имя модели из HuggingFace
-    assert info['name'] == 'cointegrated/rubert-tiny2'
+    assert info['name'] == 'SergeySavinov/rubert-tiny-toxicity'
 
 
 def test_bert_model_load_from_huggingface():
@@ -351,13 +351,19 @@ def test_bert_model_load_from_huggingface():
         mock_model_class.from_pretrained.return_value = mock_model
         mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
         
-        model = BERTModel(model_name="cointegrated/rubert-tiny2")
-        model.load()
+        model = BERTModel(model_name="SergeySavinov/rubert-tiny-toxicity")
+        # params.json на HF может отсутствовать — в unit-тесте не хотим тянуть сеть.
+        try:
+            from huggingface_hub import hf_hub_download  # noqa: F401
+            with patch("huggingface_hub.hf_hub_download", side_effect=FileNotFoundError("no params.json")):
+                model.load()
+        except ModuleNotFoundError:
+            model.load()
         
         assert model.is_loaded
         # Проверяем, что from_pretrained был вызван с правильным именем
-        mock_model_class.from_pretrained.assert_called_once_with("cointegrated/rubert-tiny2")
-        mock_tokenizer_class.from_pretrained.assert_called_once_with("cointegrated/rubert-tiny2")
+        mock_model_class.from_pretrained.assert_called_once_with("SergeySavinov/rubert-tiny-toxicity")
+        mock_tokenizer_class.from_pretrained.assert_called_once_with("SergeySavinov/rubert-tiny-toxicity")
 
 
 def test_bert_model_text_preprocessing(bert_model):

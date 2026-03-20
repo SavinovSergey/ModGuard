@@ -2,6 +2,7 @@
 """Тесты качества моделей токсичности на наборе из tests/toxicity_quality_examples.py."""
 import pytest
 from pathlib import Path
+import os
 
 from sklearn.metrics import f1_score, precision_score, recall_score
 
@@ -90,7 +91,19 @@ def _load_bert_model():
                 return model
             except Exception:
                 continue
-    return None
+
+    # Fallback: попытка загрузить BERT из HuggingFace (если локальные артефакты отсутствуют)
+    hf_model_name = os.environ.get(
+        "BERT_HF_MODEL_NAME",
+        "SergeySavinov/rubert-tiny-toxicity",
+    )
+    try:
+        # Хранимое на HF обычно — PyTorch, принудительно отключаем ONNX
+        model = BERTModel(model_name=hf_model_name, use_onnx=False)
+        model.load()
+        return model
+    except Exception:
+        return None
 
 
 def _run_quality_test(

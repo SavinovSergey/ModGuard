@@ -101,7 +101,19 @@ def register_all_models(model_manager: ModelManager) -> None:
             except Exception as e_inner:
                 logger.debug("BERT load from %s failed: %s", bert_dir, e_inner)
         if not bert_loaded:
-            logger.info("BERT model directory not found or load failed")
+            # Fallback: грузим BERT из HuggingFace, если указано
+            try:
+                from app.core.config import settings as _settings
+
+                hf_name = getattr(_settings, "bert_hf_model_name", None)
+                if hf_name:
+                    bert_model = BERTModel(model_name=hf_name)
+                    bert_model.load()
+                    model_manager.register_model("bert", bert_model)
+                    logger.info("BERT model registered and loaded from HuggingFace: %s", hf_name)
+                    bert_loaded = True
+            except Exception as e_inner:
+                logger.info("BERT HF load skipped/failed: %s", e_inner)
     except ImportError as e:
         logger.warning("Could not import BERT model: %s", e)
     except Exception as e:

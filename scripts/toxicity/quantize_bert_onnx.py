@@ -133,16 +133,27 @@ def quantize_bert_to_onnx_cpu(
     """
     ORTModel, ORTQuantizer, AutoQuantizationConfig = _ensure_optimum_onnx()
 
-    model_path = Path(model_path)
+    model_source = str(model_path)
+    model_dir: Optional[Path] = None
+    try:
+        cand = Path(model_source)
+        if cand.exists():
+            model_dir = cand
+    except Exception:
+        model_dir = None
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    export_dir = _prepare_model_dir_for_export(model_path)
-    load_path = str(export_dir if export_dir is not None else model_path)
-    if export_dir is not None:
-        print("Подготовлена дообученная модель (голова classifier.1 → classifier) для экспорта.")
+    export_dir = None
+    load_path = model_source
+    if model_dir is not None:
+        export_dir = _prepare_model_dir_for_export(model_dir)
+        load_path = str(export_dir if export_dir is not None else model_dir)
+        if export_dir is not None:
+            print("Подготовлена дообученная модель (голова classifier.1 → classifier) для экспорта.")
 
-    print(f"Загрузка модели из {model_path}...")
+    print(f"Загрузка модели из {model_source}...")
     try:
         ort_model = ORTModel.from_pretrained(
             load_path,
@@ -153,7 +164,7 @@ def quantize_bert_to_onnx_cpu(
             shutil.rmtree(export_dir, ignore_errors=True)
 
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+    tokenizer = AutoTokenizer.from_pretrained(model_source)
 
     if export_only:
         ort_model.save_pretrained(str(output_dir))
@@ -179,10 +190,11 @@ def quantize_bert_to_onnx_cpu(
         quantizer.quantize(save_dir=str(output_dir), quantization_config=qconfig)
 
     tokenizer.save_pretrained(str(output_dir))
-    for fname in ("config.json", "params.json"):
-        src = model_path / fname
-        if src.exists():
-            shutil.copy(src, output_dir / fname)
+    if model_dir is not None:
+        for fname in ("config.json", "params.json"):
+            src = model_dir / fname
+            if src.exists():
+                shutil.copy(src, output_dir / fname)
     print(f"Квантизированная ONNX модель сохранена в {output_dir}")
     return output_dir
 
@@ -216,16 +228,27 @@ def quantize_bert_to_onnx_gpu(
     ORTModel, ORTQuantizer, AutoQuantizationConfig = _ensure_optimum_onnx()
     AutoCalibrationConfig = _ensure_calibration_config()
 
-    model_path = Path(model_path)
+    model_source = str(model_path)
+    model_dir: Optional[Path] = None
+    try:
+        cand = Path(model_source)
+        if cand.exists():
+            model_dir = cand
+    except Exception:
+        model_dir = None
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    export_dir = _prepare_model_dir_for_export(model_path)
-    load_path = str(export_dir if export_dir is not None else model_path)
-    if export_dir is not None:
-        print("Подготовлена дообученная модель (голова classifier.1 → classifier) для экспорта.")
+    export_dir = None
+    load_path = model_source
+    if model_dir is not None:
+        export_dir = _prepare_model_dir_for_export(model_dir)
+        load_path = str(export_dir if export_dir is not None else model_dir)
+        if export_dir is not None:
+            print("Подготовлена дообученная модель (голова classifier.1 → classifier) для экспорта.")
 
-    print(f"Загрузка модели из {model_path}...")
+    print(f"Загрузка модели из {model_source}...")
     try:
         ort_model = ORTModel.from_pretrained(
             load_path,
@@ -236,7 +259,7 @@ def quantize_bert_to_onnx_gpu(
             shutil.rmtree(export_dir, ignore_errors=True)
 
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+    tokenizer = AutoTokenizer.from_pretrained(model_source)
 
     if export_only:
         ort_model.save_pretrained(str(output_dir))
@@ -404,13 +427,26 @@ def main():
 
     args = parser.parse_args()
 
-    model_path = Path(args.model_path)
-    if not model_path.exists():
-        parser.error(f"Модель не найдена: {model_path}")
+    model_path_input = args.model_path
+    model_dir = None
+    try:
+        cand = Path(model_path_input)
+        if cand.exists():
+            model_dir = cand
+    except Exception:
+        model_dir = None
+
+    # model_path_input может быть как локальной директорией, так и HF model-id.
+    is_local = model_dir is not None
 
     output_dir = args.output_dir
     if output_dir is None:
-        output_dir = f"{model_path}/onnx_{args.device}"
+        if is_local:
+            output_dir = f"{model_dir}/onnx_{args.device}"
+        else:
+            # Нейминг для HF model-id: SergeySavinov/rubert-tiny-toxicity -> SergeySavinov_rubert-tiny-toxicity
+            safe_id = model_path_input.replace("/", "_")
+            output_dir = f"{safe_id}/onnx_{args.device}"
     output_dir = Path(output_dir)
 
     calibration_texts = None
@@ -425,7 +461,7 @@ def main():
 
     if args.device == "cpu":
         quantize_bert_to_onnx_cpu(
-            model_path,
+            model_path_input,
             output_dir,
             cpu_arch=args.cpu_arch,
             per_channel=args.per_channel,
@@ -433,7 +469,7 @@ def main():
         )
     else:
         quantize_bert_to_onnx_gpu(
-            model_path,
+            model_path_input,
             output_dir,
             calibration_texts=calibration_texts,
             num_calibration_samples=args.num_calibration_samples,

@@ -1,0 +1,95 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+.env.local
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Models (большие файлы)
+models/*.pkl
+models/*.bin
+models/*.pt
+models/*.onnx
+models/*.h5
+*.model
+
+# Data
+data/*.parquet
+data/*.csv
+data/*.json
+
+# Logs
+*.log
+logs/
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+ARCHITECTURE_PROPOSAL.md
+IMPLEMENTATION_PLAN.md
+IMPLEMENTATION_STATUS.md
+PYTHON312_COMPATIBILITY.md
+QUICKSTART.md
+README.md
+"\320\224\320\270\320\267\320\260\320\271\320\275-\320\264\320\276\320\272\321\203\320\274\320\265\320\275\321\202 ToxicFilter"
+
+
+JUPYTER_SETUP.md
+TFIDF_SETUP_SUMMARY.md
+TFIDF_TRAINING_GUIDE.md
+TROUBLESHOOTING.md
+clean_data/
+spam_data/
+
+Toxic_Russian_Comments/
+
+
+
+
+
+.env

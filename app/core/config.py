@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     model_path: Optional[str] = None
     fallback_chain: List[str] = ["bert", "rnn", "tfidf", "regex"]
     
+    # BERT (опционально): если локальная директория моделей отсутствует,
+    # можно грузить модель из HuggingFace по model-id (уменьшает размер репозитория).
+    bert_hf_model_name: Optional[str] = "SergeySavinov/rubert-tiny-toxicity"
+    
     # Таймауты для моделей (в секундах)
     model_timeouts: dict = {
         "bert": 0.1,

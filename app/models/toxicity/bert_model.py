@@ -217,6 +217,25 @@ class BERTModel(NeuralTextModelBase):
             logger.info(f"Загрузка модели {self.hf_model_name} из HuggingFace...")
             self.model = AutoModelForSequenceClassification.from_pretrained(self.hf_model_name)
             self.tokenizer = AutoTokenizer.from_pretrained(self.hf_model_name)
+            # При наличии params.json на HF-репозитории обновляем optimal_threshold/max_length.
+            # Это важно для предсказаний (is_toxic) и кэширования TTL по точному порогу.
+            try:
+                from huggingface_hub import hf_hub_download
+
+                params_path = hf_hub_download(
+                    repo_id=self.hf_model_name,
+                    filename="params.json",
+                )
+                if params_path:
+                    with open(params_path, "r", encoding="utf-8") as f:
+                        self.model_params = json.load(f)
+                    self.max_length = self.model_params.get("max_length", self.max_length)
+                    if "optimal_threshold" in self.model_params:
+                        self.optimal_threshold = float(self.model_params["optimal_threshold"])
+                        logger.info("Загружен optimal_threshold: %s", self.optimal_threshold)
+            except Exception:
+                # params.json может отсутствовать или быть недоступным — в этом случае остаёмся на дефолтах
+                pass
             self._is_onnx = False  # фиксируется при загрузке, не меняется при predict/predict_batch
             self.model = self.model.to(self.device)
             self.model.eval()

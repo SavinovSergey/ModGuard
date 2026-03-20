@@ -13,6 +13,7 @@
 """
 import argparse
 import os
+import hashlib
 import random
 import sys
 import time
@@ -25,6 +26,7 @@ os.chdir(_root)
 import requests
 from tqdm import tqdm
 
+from typing import Any, Iterable
 
 def count_batches(
     events: list[tuple[float, int, bool]],
@@ -70,6 +72,254 @@ def get_cache_stats_from_postgres(task_ids: list[str]) -> tuple[int, int] | None
     except Exception as e:
         print(f"  Запрос процента из кэша: {e}")
         return None
+
+
+def _cache_key(text: str) -> str:
+    """Ключ модерационного кэша (должен совпадать с app/core/cache.py)."""
+    from app.core.cache import CACHE_KEY_PREFIX
+
+    normalized = (text or "").strip().lower()
+    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"{CACHE_KEY_PREFIX}{h}"
+
+
+def get_postgres_task_items_quality_stats(task_ids: list[str]) -> dict[str, Any]:
+    """
+    Возвращает метрики качества для task_items по task_ids:
+      - n_items
+      - n_invalid_* (пропуски/выход за диапазон/несогласованность model_used с флагами)
+      - n_error_items
+    """
+    from app.core.config import settings
+    from app.core.db import get_db_connection
+
+    if not settings.database_url or not task_ids:
+        return {}
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        t.task_id,
+                        t.status,
+                        COUNT(*) AS n_items,
+                        SUM(CASE WHEN ti.is_toxic IS NULL THEN 1 ELSE 0 END) AS n_missing_toxic,
+                        SUM(CASE WHEN ti.toxicity_score IS NULL OR ti.toxicity_score < 0 OR ti.toxicity_score > 1 THEN 1 ELSE 0 END) AS n_bad_toxic_score,
+                        SUM(CASE
+                            WHEN ti.tox_model_used IS NULL
+                                 AND (ti.is_toxic IS TRUE OR COALESCE(ti.toxicity_score, 0) <> 0)
+                            THEN 1 ELSE 0
+                        END) AS n_bad_toxic_model_used,
+                        SUM(CASE WHEN ti.is_spam IS NULL THEN 1 ELSE 0 END) AS n_missing_spam,
+                        SUM(CASE WHEN ti.spam_score IS NULL OR ti.spam_score < 0 OR ti.spam_score > 1 THEN 1 ELSE 0 END) AS n_bad_spam_score,
+                        SUM(CASE
+                            WHEN ti.spam_model_used IS NULL
+                                 AND (ti.is_spam IS TRUE OR COALESCE(ti.spam_score, 0) <> 0)
+                            THEN 1 ELSE 0
+                        END) AS n_bad_spam_model_used,
+                        SUM(CASE WHEN ti.error IS NOT NULL THEN 1 ELSE 0 END) AS n_error_items
+                    FROM tasks t
+                    JOIN task_items ti ON ti.task_id = t.task_id
+                    WHERE t.task_id = ANY(%s)
+                    GROUP BY t.task_id, t.status
+                    """,
+                    (task_ids,),
+                )
+                rows = cur.fetchall()
+
+        out: dict[str, Any] = {}
+        for (
+            task_id,
+            status,
+            n_items,
+            n_missing_toxic,
+            n_bad_toxic_score,
+            n_bad_toxic_model_used,
+            n_missing_spam,
+            n_bad_spam_score,
+            n_bad_spam_model_used,
+            n_error_items,
+        ) in rows:
+            out[str(task_id)] = {
+                "status": status,
+                "n_items": int(n_items),
+                "n_invalid_toxic": int(n_missing_toxic + n_bad_toxic_score + n_bad_toxic_model_used),
+                "n_invalid_spam": int(n_missing_spam + n_bad_spam_score + n_bad_spam_model_used),
+                "n_error_items": int(n_error_items),
+            }
+        return out
+    except Exception as e:
+        print(f"  [DB] Ошибка при проверке task_items: {e}")
+        return {}
+
+
+def _validate_redis_cache_for_task_items(task_ids: list[str]) -> dict[str, Any]:
+    """Проверяет, что Redis содержит кэш для тех task_items, где заполнен tox_model_used/spam_model_used."""
+    from app.core.config import settings
+    from app.core.db import get_db_connection
+
+    if not settings.redis_url:
+        return {"enabled": False, "reason": "REDIS_URL not set"}
+    if not task_ids:
+        return {"enabled": False, "reason": "no task_ids"}
+
+    try:
+        import redis
+
+        client = redis.from_url(settings.redis_url, decode_responses=True)
+        client.ping()
+    except Exception as e:
+        return {"enabled": False, "reason": f"Redis connect failed: {e}"}
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT text, tox_model_used, spam_model_used
+                    FROM task_items
+                    WHERE task_id = ANY(%s) AND text IS NOT NULL AND text <> ''
+                    """,
+                    (task_ids,),
+                )
+                rows = cur.fetchall()
+    except Exception as e:
+        return {"enabled": False, "reason": f"DB read failed for cache check: {e}"}
+
+    # key -> observed model types across task_items
+    # (один и тот же текст может встречаться многократно в разных task_id)
+    key_to_models: dict[str, dict[str, set[str]]] = {}
+    for text, tox_model_used, spam_model_used in rows:
+        if tox_model_used is None and spam_model_used is None:
+            continue
+        key = _cache_key(str(text))
+        if key not in key_to_models:
+            key_to_models[key] = {"tox_models": set(), "spam_models": set()}
+        if tox_model_used is not None:
+            key_to_models[key]["tox_models"].add(str(tox_model_used))
+        if spam_model_used is not None:
+            key_to_models[key]["spam_models"].add(str(spam_model_used))
+
+    uniq_keys = list(key_to_models.keys())
+    if not uniq_keys:
+        return {"enabled": True, "checked_keys": 0, "found_keys": 0, "missing_keys": 0}
+
+    try:
+        values: list[Any] = client.mget(uniq_keys)
+        found_keys = sum(1 for v in values if v is not None)
+        missing_keys = len(uniq_keys) - found_keys
+
+        def _cat_from_models(models: set[str]) -> str:
+            if not models:
+                return "none"
+            if "regex" in models:
+                return "regex"
+            if "tfidf" in models:
+                return "tfidf"
+            return "other"
+
+        # Группируем отсутствующие ключи по типам моделей.
+        missing_by_tox_cat: dict[str, int] = {}
+        missing_by_spam_cat: dict[str, int] = {}
+        missing_examples: list[dict[str, Any]] = []
+        for i, v in enumerate(values):
+            if v is not None:
+                continue
+            key = uniq_keys[i]
+            models = key_to_models.get(key) or {"tox_models": set(), "spam_models": set()}
+            tox_cat = _cat_from_models(models.get("tox_models") or set())
+            spam_cat = _cat_from_models(models.get("spam_models") or set())
+            missing_by_tox_cat[tox_cat] = missing_by_tox_cat.get(tox_cat, 0) + 1
+            missing_by_spam_cat[spam_cat] = missing_by_spam_cat.get(spam_cat, 0) + 1
+            if len(missing_examples) < 5:
+                # ключ целиком длинный; печатаем только последние 8 символов для удобства
+                missing_examples.append(
+                    {
+                        "key_tail": key[-8:],
+                        "tox_cat": tox_cat,
+                        "spam_cat": spam_cat,
+                        "tox_models": sorted(list(models.get("tox_models") or set())),
+                        "spam_models": sorted(list(models.get("spam_models") or set())),
+                    }
+                )
+
+        # На небольшом подмножестве проверим, что payload валиден:
+        #  - json
+        #  - scores в диапазоне
+        #  - типы полей
+        sample_indices = [i for i, v in enumerate(values) if v is not None][:50]
+        sample_ok = 0
+        sample_errors: list[str] = []
+        for i in sample_indices:
+            raw = values[i]
+            try:
+                payload = __import__("json").loads(raw)
+                tox_score = float(payload.get("toxicity_score", 0.0))
+                spam_score = float(payload.get("spam_score", 0.0))
+                is_toxic = payload.get("is_toxic")
+                is_spam = payload.get("is_spam")
+
+                if not (
+                    0.0 <= tox_score <= 1.0
+                    and 0.0 <= spam_score <= 1.0
+                    and isinstance(is_toxic, bool)
+                    and isinstance(is_spam, bool)
+                ):
+                    raise ValueError("score/type out of range")
+
+                if (
+                    "toxicity_types" not in payload
+                    or "tox_model_used" not in payload
+                    or "spam_model_used" not in payload
+                ):
+                    raise ValueError("missing expected fields")
+
+                tox_types = payload.get("toxicity_types", {})
+                if not isinstance(tox_types, dict):
+                    raise ValueError("toxicity_types is not dict")
+                for _, v in tox_types.items():
+                    vv = float(v)
+                    if not (0.0 <= vv <= 1.0):
+                        raise ValueError("toxicity_types value out of range")
+
+                spam_model_used = payload.get("spam_model_used")
+                tox_model_used = payload.get("tox_model_used")
+                if tox_model_used is not None and not isinstance(tox_model_used, str):
+                    raise ValueError("tox_model_used type invalid")
+                if spam_model_used is not None and not isinstance(spam_model_used, str):
+                    raise ValueError("spam_model_used type invalid")
+
+                # Проверим согласованность model_used со значениями из task_items
+                key = uniq_keys[i]
+                models = key_to_models.get(key) or {"tox_models": set(), "spam_models": set()}
+                tox_expected = models.get("tox_models") or set()
+                spam_expected = models.get("spam_models") or set()
+                if tox_model_used is not None and str(tox_model_used) not in tox_expected and tox_expected:
+                    raise ValueError(f"tox_model_used mismatch: got={tox_model_used} expected={sorted(list(tox_expected))[:3]}")
+                if spam_model_used is not None and str(spam_model_used) not in spam_expected and spam_expected:
+                    raise ValueError(
+                        f"spam_model_used mismatch: got={spam_model_used} expected={sorted(list(spam_expected))[:3]}"
+                    )
+
+                sample_ok += 1
+            except Exception as e:
+                sample_errors.append(f"{uniq_keys[i][-8:]}: {e}")
+
+        return {
+            "enabled": True,
+            "checked_keys": len(uniq_keys),
+            "found_keys": found_keys,
+            "missing_keys": missing_keys,
+            "missing_by_tox_cat": missing_by_tox_cat,
+            "missing_by_spam_cat": missing_by_spam_cat,
+            "missing_examples": missing_examples,
+            "sample_ok": sample_ok,
+            "sample_errors": sample_errors[:5],
+        }
+    except Exception as e:
+        return {"enabled": False, "reason": f"Redis mget failed: {e}"}
 
 
 def load_texts(path: Path, max_samples: int | None) -> list[str]:
@@ -199,6 +449,7 @@ def run(
     all_task_ids = []
     batch_times = []
     duplicate_task_ids = []
+    submitted_batches: list[dict[str, Any]] = []  # expected_items + returned task_ids
 
     print(f"Параметры: batch_size={batch_size}, batch_window={batch_window_sec}s, delay={delay_min_ms}-{delay_max_ms}ms")
     print(f"Дубликаты: {len(duplicate_indices)} сообщений через {duplicate_after_sec}s (проверка кэша)")
@@ -230,6 +481,7 @@ def run(
         t1 = time.perf_counter()
         batch_times.append((len(items), t1 - t0, has_dup))
         if task_ids:
+            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup})
             all_task_ids.extend(task_ids)
             if has_dup:
                 duplicate_task_ids.extend(task_ids)
@@ -247,6 +499,7 @@ def run(
         t1 = time.perf_counter()
         batch_times.append((len(items), t1 - t0, has_dup))
         if task_ids:
+            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup})
             all_task_ids.extend(task_ids)
             if has_dup:
                 duplicate_task_ids.extend(task_ids)
@@ -286,6 +539,104 @@ def run(
         print(f"  Процент сообщений из кэша:   {pct:.1f}% ({n_cache}/{n_total})")
     else:
         print("  Процент из кэша: недоступен (нет DATABASE_URL или запись в task_items)")
+
+    # -----------------------------
+    # Проверка корректности цепочки (DB + cache)
+    # -----------------------------
+    unique_task_ids = list(dict.fromkeys(all_task_ids))
+    submitted_items_total = sum(b["n_items"] for b in submitted_batches)
+    print()
+    print("--- Проверка корректности ---")
+
+    t_db0 = time.perf_counter()
+    db_stats = get_postgres_task_items_quality_stats(unique_task_ids)
+    t_db1 = time.perf_counter()
+    if not db_stats:
+        print("  [DB] Пропуск проверки (нет DATABASE_URL или ошибка/нет данных).")
+    else:
+        # 1) Проверка: API results_count == task_items количество для completed задач
+        db_mismatches = []
+        for tid in unique_task_ids:
+            st = summary["statuses"].get(tid)
+            if st != "completed":
+                continue
+            db_n = db_stats.get(tid, {}).get("n_items", 0)
+            api_n = summary["results_count"].get(tid, 0)
+            if int(db_n) != int(api_n):
+                db_mismatches.append((tid, api_n, db_n))
+        if db_mismatches:
+            print(f"  [DB] Несоответствие результатов API vs task_items: {len(db_mismatches)} task_id")
+            for tid, api_n, db_n in db_mismatches[:5]:
+                print(f"    - {tid[:8]}... api_results={api_n} db_items={db_n}")
+        else:
+            print("  [DB] Соответствие: API results_count == task_items count (для completed).")
+
+        # 2) Проверка: для каждого submitted батча сумма task_items по его task_ids == expected n_items
+        batch_mismatches = []
+        total_db_items = 0
+        for b in submitted_batches:
+            task_ids = b["task_ids"]
+            expected = int(b["n_items"])
+            n_db = sum(int(db_stats.get(tid, {}).get("n_items", 0)) for tid in task_ids)
+            total_db_items += n_db
+            if n_db != expected:
+                batch_mismatches.append({"task_ids": task_ids, "expected": expected, "db_items": n_db})
+        if batch_mismatches:
+            print(f"  [DB] Ошибка количества items по батчам: {len(batch_mismatches)} батч(ей)")
+            for m in batch_mismatches[:3]:
+                print(f"    - expected={m['expected']} db_items={m['db_items']} task_ids={[t[:8]+'...' for t in m['task_ids']]}")
+        else:
+            print(f"  [DB] Items присутствуют: total_db_items={total_db_items}, submitted_items={submitted_items_total}")
+
+        # 3) Проверка “адекватности” полей для completed задач
+        bad_tasks = []
+        for tid, stinfo in db_stats.items():
+            if stinfo.get("status") != "completed":
+                continue
+            if int(stinfo.get("n_invalid_toxic", 0)) > 0 or int(stinfo.get("n_invalid_spam", 0)) > 0 or int(stinfo.get("n_error_items", 0)) > 0:
+                bad_tasks.append((tid, stinfo))
+        if bad_tasks:
+            print(f"  [DB] Найдены невалидные/ошибочные результаты: {len(bad_tasks)} task_id")
+            for tid, stinfo in bad_tasks[:5]:
+                print(f"    - {tid[:8]}... invalid_toxic={stinfo['n_invalid_toxic']} invalid_spam={stinfo['n_invalid_spam']} error_items={stinfo['n_error_items']}")
+        else:
+            print("  [DB] Качество результатов: OK (completed tasks).")
+
+    # 4) Проверка Redis кэша (опционально — если доступен)
+    t_redis0 = time.perf_counter()
+    cache_check = _validate_redis_cache_for_task_items(unique_task_ids)
+    t_redis1 = time.perf_counter()
+    if not cache_check:
+        print("  [Redis] Пропуск проверки кэша.")
+    else:
+        if not cache_check.get("enabled"):
+            print(f"  [Redis] Пропуск проверки кэша: {cache_check.get('reason')}")
+        else:
+            checked = cache_check.get("checked_keys", 0)
+            found = cache_check.get("found_keys", 0)
+            missing = cache_check.get("missing_keys", 0)
+            print(f"  [Redis] Кэш ключи: checked={checked}, found={found}, missing={missing}")
+            if missing > 0:
+                print("  [Redis] Внимание: часть ключей кэша отсутствует — это повод углубиться.")
+                missing_by_tox_cat = cache_check.get("missing_by_tox_cat") or {}
+                missing_by_spam_cat = cache_check.get("missing_by_spam_cat") or {}
+                if missing_by_tox_cat:
+                    print(f"  [Redis] Missing by tox models: {missing_by_tox_cat}")
+                if missing_by_spam_cat:
+                    print(f"  [Redis] Missing by spam models: {missing_by_spam_cat}")
+                examples = cache_check.get("missing_examples") or []
+                if examples:
+                    print("  [Redis] Missing examples (tail):")
+                    for ex in examples:
+                        print(
+                            f"    - {ex.get('key_tail')} tox_cat={ex.get('tox_cat')} spam_cat={ex.get('spam_cat')} "
+                            f"tox_models={ex.get('tox_models')} spam_models={ex.get('spam_models')}"
+                        )
+            if cache_check.get("sample_errors"):
+                print(f"  [Redis] Ошибки в sample payload: {cache_check['sample_errors']}")
+
+    print(f"  [Timing] DB validation: {(t_db1 - t_db0):.2f}s, Redis validation: {(t_redis1 - t_redis0):.2f}s")
+
     print("Готово.")
 
 
