@@ -6,6 +6,9 @@
   regex  — только regex pre-filter: Precision/Recall/F1 при фиксированном пороге,
           FP/FN с указанием сработавших категорий (earnings, cta_links, casino и т.д.).
 
+Режим оценки на тесте: передайте `--eval-mode test`, тогда порог не подбирается заново,
+а используется `model.optimal_threshold` (или `--threshold`, если задан).
+
 Примеры:
   python scripts/spam/validate_spam.py --model-type tfidf --val-data spam_data/val.parquet
   python scripts/spam/validate_spam.py --model-type regex --val-data spam_data/val.parquet
@@ -19,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from sklearn.metrics import (
     average_precision_score,
     f1_score,
@@ -35,7 +39,9 @@ from scripts.shared.common import find_threshold_max_f1_min_precision
 MIN_PRECISION = 0.90
 
 
-def _run_tfidf(args, model_dir: Path, df: pd.DataFrame, texts: list, y_true: np.ndarray) -> None:
+def _run_tfidf(
+    args, model_dir: Path, df: pd.DataFrame, texts: list, y_true: np.ndarray, batch_size: int
+) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -51,25 +57,46 @@ def _run_tfidf(args, model_dir: Path, df: pd.DataFrame, texts: list, y_true: np.
     )
     print("Предсказания: полный пайплайн (TF-IDF + ручные признаки + правило caps+!!).")
 
-    print("Получение вероятностей...")
-    results = model.predict_batch(texts)
+    results = []
+    for start in tqdm(
+        range(0, len(texts), batch_size),
+        desc="Получение предсказаний tfidf...",
+    ):
+        batch = texts[start : start + batch_size]
+        results.extend(model.predict_batch(batch))
+    print()
+
     y_proba = np.array([r["spam_score"] for r in results], dtype=np.float64)
 
     precision_curve, recall_curve, _ = precision_recall_curve(y_true, y_proba)
     ap = average_precision_score(y_true, y_proba)
 
-    thresh, prec, rec, f1 = find_threshold_max_f1_min_precision(
-        y_true, y_proba, min_precision=MIN_PRECISION
-    )
-    print(f"\nПересчитанный порог (max F1 при precision >= {MIN_PRECISION}):")
-    print(f"  Порог: {thresh:.4f}")
-    print(f"  Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
-
-    y_pred = (y_proba >= thresh).astype(np.int64)
+    if args.eval_mode == "val":
+        thresh, prec, rec, f1 = find_threshold_max_f1_min_precision(
+            y_true, y_proba, min_precision=MIN_PRECISION
+        )
+        print(f"\nПересчитанный порог (max F1 при precision >= {MIN_PRECISION}):")
+        print(f"  Порог: {thresh:.4f}")
+        print(f"  Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
+        y_pred = (y_proba >= thresh).astype(np.int64)
+    else:
+        thresh = (
+            float(args.threshold)
+            if args.threshold is not None
+            else float(getattr(model, "optimal_threshold", 0.5))
+        )
+        y_pred = (y_proba >= thresh).astype(np.int64)
+        prec = precision_score(y_true, y_pred, zero_division=0)
+        rec = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        print(f"\nTest-eval: используем фиксированный порог = {thresh:.4f}")
+        print(f"  Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
+        print(f"  Average Precision (AP): {ap:.4f}")
     fp_idx = np.where((y_true == 0) & (y_pred == 1))[0]
     fn_idx = np.where((y_true == 1) & (y_pred == 0))[0]
 
-    errors_path = args.errors_output or str(model_dir / "val_errors.csv")
+    default_errors = "val_errors.csv" if args.eval_mode == "val" else "test_errors.csv"
+    errors_path = args.errors_output or str(model_dir / default_errors)
     Path(errors_path).parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for idx in fp_idx:
@@ -115,13 +142,19 @@ def _run_tfidf(args, model_dir: Path, df: pd.DataFrame, texts: list, y_true: np.
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(-0.02, 1.02)
     fig.tight_layout()
-    out_path = args.output or str(model_dir / "pr_curve.png")
+    if args.output:
+        out_path = args.output
+    else:
+        out_path = str(model_dir / ("pr_curve.png" if args.eval_mode == "val" else "pr_curve_test.png"))
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"\nГрафик сохранён: {out_path}")
 
     if args.update_params:
+        if args.eval_mode != "val":
+            print("  update-params отключен для eval-mode='test' (порог не пересчитываем).")
+            return
         params_path = model_dir / "params.json"
         if not params_path.exists():
             print("  params.json не найден, пропуск обновления.")
@@ -136,7 +169,7 @@ def _run_tfidf(args, model_dir: Path, df: pd.DataFrame, texts: list, y_true: np.
             print(f"  params.json обновлён: optimal_threshold {old_th} -> {thresh:.4f}")
 
 
-def _run_regex(args, df: pd.DataFrame, texts: list, y_true: np.ndarray) -> None:
+def _run_regex(args, df: pd.DataFrame, texts: list, y_true: np.ndarray, batch_size: int) -> None:
     from app.models.spam.regex_model import SpamRegexModel
 
     print("Загрузка regex спам-модели (pre-filter)...")
@@ -144,7 +177,15 @@ def _run_regex(args, df: pd.DataFrame, texts: list, y_true: np.ndarray) -> None:
     model.load()
     print("Предсказания: только regex-паттерны (earnings, cta_links, casino, crypto, ...).")
 
-    results = model.predict_batch(texts)
+    results = []
+    for start in tqdm(
+        range(0, len(texts), batch_size),
+        desc="Получение предсказаний regex...",
+    ):
+        batch = texts[start : start + batch_size]
+        results.extend(model.predict_batch(batch))
+    print()
+
     y_pred = np.array([1 if r["is_spam"] else 0 for r in results], dtype=np.int64)
 
     prec = precision_score(y_true, y_pred, zero_division=0)
@@ -158,7 +199,8 @@ def _run_regex(args, df: pd.DataFrame, texts: list, y_true: np.ndarray) -> None:
     fn_idx = np.where((y_true == 1) & (y_pred == 0))[0]
 
     out_dir = Path(args.errors_output).parent if args.errors_output else Path("models/spam/regex")
-    errors_path = args.errors_output or str(out_dir / "val_errors_regex.csv")
+    default_errors = "val_errors_regex.csv" if args.eval_mode == "val" else "test_errors_regex.csv"
+    errors_path = args.errors_output or str(out_dir / default_errors)
     Path(errors_path).parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for idx in fp_idx:
@@ -218,6 +260,12 @@ def main() -> None:
         help="Макс. число примеров (по умолчанию все)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1024,
+        help="Размер батча для predict_batch (tfidf, regex; по умолчанию 256)",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -227,6 +275,19 @@ def main() -> None:
         "--update-params",
         action="store_true",
         help="Обновить optimal_threshold в params.json (только tfidf)",
+    )
+    parser.add_argument(
+        "--eval-mode",
+        type=str,
+        choices=("val", "test"),
+        default="val",
+        help="Режим оценки: 'val' — подбираем порог (старое поведение), 'test' — используем сохранённый порог model.optimal_threshold без подбора.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Явно заданный порог для is_spam (актуально для eval-mode='test').",
     )
     parser.add_argument(
         "--errors-output",
@@ -268,9 +329,9 @@ def main() -> None:
             raise FileNotFoundError(
                 f"В {model_dir} должны быть model.pkl и vectorizer.pkl. Укажите --model-dir."
             )
-        _run_tfidf(args, model_dir, df, texts, y_true)
+        _run_tfidf(args, model_dir, df, texts, y_true, args.batch_size)
     else:
-        _run_regex(args, df, texts, y_true)
+        _run_regex(args, df, texts, y_true, args.batch_size)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,10 @@
   — график PR-кривой (pr_curve.png),
   — примеры FP/FN (val_errors.csv).
 
+Режим оценки на тесте (без подбора порога):
+используйте `--eval-mode test` — порог берётся из `model.optimal_threshold`
+(или из `--threshold`, если задан).
+
 Для regex-модели (бинарная 0/1) PR-кривая не строится,
 выводятся только precision/recall/F1 при фиксированном пороге 0.5.
 
@@ -188,6 +192,19 @@ def main() -> None:
         default=256,
         help="Размер батча для predict_batch (по умолчанию 256)",
     )
+    parser.add_argument(
+        "--eval-mode",
+        type=str,
+        choices=("val", "test"),
+        default="val",
+        help="Режим оценки: 'val' — подбор порога, 'test' — используем сохранённый порог model.optimal_threshold без подбора.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Явно заданный порог для is_toxic (актуально для eval-mode='test').",
+    )
     args = parser.parse_args()
 
     model_type = args.model_type
@@ -257,31 +274,60 @@ def main() -> None:
         print(f"\nRegex (порог фиксирован = {thresh}):")
         print(f"  Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
     else:
-        precision_curve, recall_curve, thresholds_pr = precision_recall_curve(y_true, y_proba)
+        precision_curve, recall_curve, _ = precision_recall_curve(y_true, y_proba)
         ap = average_precision_score(y_true, y_proba)
 
-        thresh, prec, rec, f1 = find_threshold_max_f1_min_precision(
-            y_true, y_proba, min_precision=MIN_PRECISION
-        )
-        print(f"\nОптимальный порог (max F1 при precision >= {MIN_PRECISION}):")
-        print(f"  Порог: {thresh:.4f}")
-        print(f"  Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
+        if args.eval_mode == "val":
+            thresh, prec, rec, f1 = find_threshold_max_f1_min_precision(
+                y_true, y_proba, min_precision=MIN_PRECISION
+            )
+            print(f"\nОптимальный порог (max F1 при precision >= {MIN_PRECISION}):")
+            print(f"  Порог: {thresh:.4f}")
+            print(f"  Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
+        else:
+            thresh = (
+                float(args.threshold)
+                if args.threshold is not None
+                else float(getattr(model, "optimal_threshold", 0.5))
+            )
+            y_pred_fixed = (y_proba >= thresh).astype(np.int64)
+            prec = precision_score(y_true, y_pred_fixed, zero_division=0)
+            rec = recall_score(y_true, y_pred_fixed, zero_division=0)
+            f1 = f1_score(y_true, y_pred_fixed, zero_division=0)
+            print(f"\nTest-eval: используем фиксированный порог = {thresh:.4f}")
+            print(f"  Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
+
         print(f"  Average Precision (AP): {ap:.4f}")
 
         fig, ax = plt.subplots(figsize=(7, 6))
         ax.plot(recall_curve, precision_curve, color="navy", lw=2, label=f"PR (AP = {ap:.3f})")
-        ax.axhline(MIN_PRECISION, color="gray", linestyle="--", alpha=0.7, label=f"Precision = {MIN_PRECISION}")
-        ax.scatter([rec], [prec], color="red", s=80, zorder=5, label=f"Порог {thresh:.3f} (F1={f1:.3f})")
+        if args.eval_mode == "val":
+            ax.axhline(
+                MIN_PRECISION,
+                color="gray",
+                linestyle="--",
+                alpha=0.7,
+                label=f"Precision = {MIN_PRECISION}",
+            )
+        ax.scatter(
+            [rec],
+            [prec],
+            color="red",
+            s=80,
+            zorder=5,
+            label=f"Порог {thresh:.3f} (F1={f1:.3f})",
+        )
         ax.set_xlabel("Recall")
         ax.set_ylabel("Precision")
-        ax.set_title(f"Precision-Recall на валидации ({model_type})")
+        ax.set_title(f"Precision-Recall ({model_type}, {args.eval_mode})")
         ax.legend(loc="best")
         ax.grid(True, alpha=0.3)
         ax.set_xlim(-0.02, 1.02)
         ax.set_ylim(-0.02, 1.02)
         fig.tight_layout()
 
-        pr_path = str(output_dir / "pr_curve.png")
+        pr_name = "pr_curve.png" if args.eval_mode == "val" else "pr_curve_test.png"
+        pr_path = str(output_dir / pr_name)
         fig.savefig(pr_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"PR-кривая сохранена: {pr_path}")
@@ -290,7 +336,7 @@ def main() -> None:
     fp_idx = np.where((y_true == 0) & (y_pred == 1))[0]
     fn_idx = np.where((y_true == 1) & (y_pred == 0))[0]
 
-    errors_path = str(output_dir / "val_errors.csv")
+    errors_path = str(output_dir / ("val_errors.csv" if args.eval_mode == "val" else "test_errors.csv"))
     rows = []
     for idx in fp_idx:
         rows.append({
