@@ -143,22 +143,25 @@ class TfidfModelTrainer:
         """
         # Параметры для TF-IDF
         tfidf_params = {
-            'max_features': trial.suggest_int('max_features', 10000, 100000, step=10000),
+            'max_features': trial.suggest_int('max_features', 10000, 150000, step=10000),
             'ngram_range': (
-                1,
-                trial.suggest_int('max_ngram', 1, 3)
+                trial.suggest_int('min_ngram', 2, 3),
+                trial.suggest_int('max_ngram', 4, 6)
             ),
-            'min_df': trial.suggest_int('min_df', 1, 10),
-            'max_df': trial.suggest_float('max_df', 0.5, 1.0),
+            'use_idf': trial.suggest_categorical('use_idf', [True, False]),
+            'norm': trial.suggest_categorical('norm', ['l1', 'l2']),
+            'min_df': trial.suggest_int('min_df', 1, 30),
+            'max_df': trial.suggest_float('max_df', 0.2, 0.9),
             'sublinear_tf': trial.suggest_categorical('sublinear_tf', [True, False]),
+            'analyzer': 'char_wb'
         }
         
         # Параметры для Logistic Regression
         lr_params = {
             'C': trial.suggest_float('C', 0.01, 100.0, log=True),
-            'penalty': trial.suggest_categorical('penalty', ['l1', 'l2']),
-            'solver': 'liblinear',  # liblinear работает с l1 и l2
-            'max_iter': 1000,
+            'solver': 'lbfgs',
+            'max_iter': 2000,
+            'class_weight': 'balanced',
             'random_state': self.random_state
         }
 
@@ -241,20 +244,23 @@ class TfidfModelTrainer:
         tfidf_params = {
             'max_features': self.best_params['max_features'],
             'ngram_range': (
-                1,
+                self.best_params['min_ngram'],
                 self.best_params['max_ngram']
             ),
+            'use_idf': self.best_params['use_idf'],
+            'norm': self.best_params['norm'],
             'min_df': self.best_params['min_df'],
             'max_df': self.best_params['max_df'],
             'sublinear_tf': self.best_params['sublinear_tf'],
+            'analyzer': 'char_wb'
         }
         
         # Восстанавливаем параметры Logistic Regression
         lr_params = {
             'C': self.best_params['C'],
-            'l1_ratio': 0,
-            'solver': 'liblinear',
-            'max_iter': 1000,
+            'solver': 'lbfgs',
+            'max_iter': 2000,
+            'class_weight': 'balanced',
             'random_state': self.random_state,
         }
         

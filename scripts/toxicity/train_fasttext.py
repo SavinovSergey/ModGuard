@@ -126,10 +126,13 @@ class FastTextModelTrainer:
         """
         # Параметры для FastText
         fasttext_params = {
-            'dim': trial.suggest_int('dim', 50, 300, step=50),
-            'epoch': trial.suggest_int('epoch', 5, 50),
+            'dim': trial.suggest_int('dim', 50, 150, step=50),
+            'ws': trial.suggest_int('ws', 3, 10),
+            'epoch': trial.suggest_int('epoch', 5, 15),
             'lr': trial.suggest_float('lr', 0.01, 1.0, log=True),
-            'word_ngrams': trial.suggest_int('word_ngrams', 1, 3),
+            'minn': trial.suggest_int('minn', 2, 3),
+            'maxn': trial.suggest_int('maxn', 4, 5),
+            'minCount': trial.suggest_int('minCount', 5, 50),
         }
         
         if self.use_cv:
@@ -237,9 +240,12 @@ class FastTextModelTrainer:
         # Восстанавливаем параметры FastText
         fasttext_params = {
             'dim': self.best_params['dim'],
+            'ws': self.best_params['ws'],
             'epoch': self.best_params['epoch'],
             'lr': self.best_params['lr'],
-            'word_ngrams': self.best_params['word_ngrams'],
+            'minn': self.best_params['minn'],
+            'maxn': self.best_params['maxn'],
+            'minCount': self.best_params['minCount'],
         }
         
         # Обучаем финальную FastText модель на обучающих данных
@@ -248,6 +254,17 @@ class FastTextModelTrainer:
             y_train.tolist(),
             **fasttext_params
         )
+
+        print('Квантизация обученной модели.')
+        # Создаем временный файл для FastText
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+            # FastText требует формат: __label__0 текст или __label__1 текст
+            for text, label in zip(X_train.tolist(), y_train.tolist()):
+                label_str = '__label__1' if label == 1 else '__label__0'
+                f.write(f"{label_str} {text}\n")
+            temp_file = f.name
+        
+        self.best_model.quantize(input=temp_file, retrain=True)
         
         # Получаем вероятности на валидационных данных для оценки метрик
         if X_val is not None and y_val is not None:
@@ -363,7 +380,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     trainer.save_model(
-        model_path=str(output_dir / 'fasttext_model.bin'),
+        model_path=str(output_dir / 'fasttext_model.ftz'),
         params_path=str(output_dir / 'params.json')
     )
     
