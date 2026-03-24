@@ -28,6 +28,21 @@ from tqdm import tqdm
 
 from typing import Any, Iterable
 
+
+def percentiles(values: list[float], ps: tuple[int, ...] = (50, 95, 99)) -> dict[str, float]:
+    """Вычисляет процентили (линейная интерполяция)."""
+    if not values:
+        return {}
+    s = sorted(values)
+    n = len(s)
+    result = {}
+    for p in ps:
+        k = (n - 1) * p / 100
+        f = int(k)
+        c = min(f + 1, n - 1)
+        result[f"p{p}"] = s[f] + (k - f) * (s[c] - s[f])
+    return result
+
 def count_batches(
     events: list[tuple[float, int, bool]],
     batch_size: int,
@@ -338,7 +353,7 @@ def load_texts(path: Path, max_samples: int | None) -> list[str]:
     return texts
 
 
-def send_batch(api_url: str, items: list[dict], prefix: str) -> tuple[list[str], int]:
+def send_batch(api_url: str, items: list[str], prefix: str) -> tuple[list[str], int]:
     """POST /classify/batch-async. Возвращает (список task_id для опроса, статус-код)."""
     url = f"{api_url.rstrip('/')}/api/v1/classify/batch-async"
     payload = {"items": [{"text": t} for t in items], "source": "validate_chain"}
@@ -363,6 +378,7 @@ def poll_until_done(api_url: str, task_ids: list[str], poll_interval: float, tim
     started = time.perf_counter()
     statuses = {tid: None for tid in task_ids}
     results_count = {tid: 0 for tid in task_ids}
+    completed_at: dict[str, float] = {}
     errors = {}
     while time.perf_counter() - started < timeout:
         done = True
@@ -380,8 +396,12 @@ def poll_until_done(api_url: str, task_ids: list[str], poll_interval: float, tim
                 statuses[tid] = s
                 if s == "completed":
                     results_count[tid] = len(data.get("results") or [])
+                    if tid not in completed_at:
+                        completed_at[tid] = time.perf_counter()
                 elif s == "failed":
                     errors[tid] = data.get("error") or "unknown"
+                    if tid not in completed_at:
+                        completed_at[tid] = time.perf_counter()
                 else:
                     done = False
             except Exception as e:
@@ -394,10 +414,149 @@ def poll_until_done(api_url: str, task_ids: list[str], poll_interval: float, tim
     return {
         "statuses": statuses,
         "results_count": results_count,
+        "completed_at": completed_at,
         "errors": errors,
         "elapsed": elapsed,
         "all_done": all(statuses.get(t) in ("completed", "failed", "error") for t in task_ids),
     }
+
+
+def _normalize_cache_text(text: str) -> str:
+    """Нормализация текста в стиле cache key: strip + lower."""
+    return (text or "").strip().lower()
+
+
+def _deduplicate_texts_for_cache(texts: list[str]) -> list[str]:
+    """Дедупликация по нормализованному тексту (как для ключа кэша)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in texts:
+        key = _normalize_cache_text(t)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
+def _run_single_latency_once(
+    api_url: str,
+    sample: list[str],
+    poll_interval: float,
+    timeout: float,
+    title: str,
+) -> tuple[list[float], int]:
+    """Один прогон замера latency одиночных сообщений по фиксированному набору sample."""
+    classify_url = f"{api_url.rstrip('/')}/api/v1/classify"
+    task_url_base = f"{api_url.rstrip('/')}/api/v1/tasks"
+    latencies: list[float] = []
+    errors = 0
+
+    print(f"\n--- {title} (n={len(sample)}) ---")
+    for text in tqdm(sample, desc=title, unit="msg"):
+        t0 = time.perf_counter()
+        try:
+            r = requests.post(classify_url, json={"text": text}, timeout=10)
+            if r.status_code != 200:
+                errors += 1
+                continue
+            task_id = r.json().get("task_id")
+            if not task_id:
+                errors += 1
+                continue
+
+            while time.perf_counter() - t0 < timeout:
+                pr = requests.get(f"{task_url_base}/{task_id}", timeout=10)
+                if pr.status_code == 200:
+                    status = pr.json().get("status")
+                    if status == "completed":
+                        latencies.append(time.perf_counter() - t0)
+                        break
+                    if status == "failed":
+                        errors += 1
+                        break
+                time.sleep(poll_interval)
+            else:
+                errors += 1
+        except Exception:
+            errors += 1
+
+    if not latencies:
+        print(f"  Нет успешных замеров. Ошибок: {errors}")
+        return latencies, errors
+
+    pcts = percentiles(latencies)
+    avg = sum(latencies) / len(latencies)
+    print(f"  Успешно: {len(latencies)}/{len(sample)}, ошибок: {errors}")
+    print(f"  Avg:  {avg * 1000:.0f}ms")
+    print(f"  p50:  {pcts['p50'] * 1000:.0f}ms")
+    print(f"  p95:  {pcts['p95'] * 1000:.0f}ms")
+    print(f"  p99:  {pcts['p99'] * 1000:.0f}ms")
+    print(f"  Min:  {min(latencies) * 1000:.0f}ms, Max: {max(latencies) * 1000:.0f}ms")
+    return latencies, errors
+
+
+def run_single_latency_test(
+    api_url: str,
+    texts: list[str],
+    n_messages: int,
+    poll_interval: float = 0.05,
+    timeout: float = 30.0,
+    mode: str = "cold-hot",
+    dedup: bool = True,
+) -> None:
+    """
+    Последовательно отправляет одиночные сообщения через POST /classify,
+    опрашивает GET /tasks/{task_id} до завершения и замеряет end-to-end latency.
+    mode:
+      - "single": один прогон по случайной выборке
+      - "cold-hot": два прогона по одному и тому же набору:
+            1) очистка кэша -> cold-cache
+            2) без очистки -> hot-cache
+    """
+    source_texts = _deduplicate_texts_for_cache(texts) if dedup else list(texts)
+    if len(source_texts) < len(texts) and dedup:
+        print(f"\n[Single latency] Дедупликация по cache-нормализации: {len(texts)} -> {len(source_texts)}")
+    sample = random.sample(source_texts, min(n_messages, len(source_texts)))
+
+    if mode == "single":
+        _run_single_latency_once(
+            api_url=api_url,
+            sample=sample,
+            poll_interval=poll_interval,
+            timeout=timeout,
+            title="Тест latency одиночных сообщений",
+        )
+        return
+
+    if mode != "cold-hot":
+        raise ValueError(f"Unsupported single latency mode: {mode}")
+
+    from scripts.run.clear_redis import clear_rs
+
+    clear_rs()
+    print("[Single latency] Кэш Redis очищен перед cold-cache прогоном.")
+
+    cold_latencies, _ = _run_single_latency_once(
+        api_url=api_url,
+        sample=sample,
+        poll_interval=poll_interval,
+        timeout=timeout,
+        title="Cold-cache single latency",
+    )
+    hot_latencies, _ = _run_single_latency_once(
+        api_url=api_url,
+        sample=sample,
+        poll_interval=poll_interval,
+        timeout=timeout,
+        title="Hot-cache single latency",
+    )
+
+    if cold_latencies and hot_latencies:
+        cold_avg = sum(cold_latencies) / len(cold_latencies)
+        hot_avg = sum(hot_latencies) / len(hot_latencies)
+        if hot_avg > 0:
+            print(f"  Ускорение hot vs cold (Avg): x{cold_avg / hot_avg:.2f}")
 
 
 def run(
@@ -413,6 +572,9 @@ def run(
     poll_interval: float,
     timeout: float,
     clear_cache: bool = False,
+    single_latency_n: int = 0,
+    single_latency_mode: str = "cold-hot",
+    single_latency_dedup: bool = True,
 ) -> None:
     if clear_cache:
         from scripts.run.clear_redis import clear_rs
@@ -481,7 +643,7 @@ def run(
         t1 = time.perf_counter()
         batch_times.append((len(items), t1 - t0, has_dup))
         if task_ids:
-            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup})
+            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup, "sent_at": t0})
             all_task_ids.extend(task_ids)
             if has_dup:
                 duplicate_task_ids.extend(task_ids)
@@ -499,7 +661,7 @@ def run(
         t1 = time.perf_counter()
         batch_times.append((len(items), t1 - t0, has_dup))
         if task_ids:
-            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup})
+            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup, "sent_at": t0})
             all_task_ids.extend(task_ids)
             if has_dup:
                 duplicate_task_ids.extend(task_ids)
@@ -528,8 +690,40 @@ def run(
         for tid, err in list(summary["errors"].items())[:5]:
             print(f"  Ошибка {tid[:8]}...: {err}")
     if batch_times:
-        avg_send = sum(t for _, t, _ in batch_times) / len(batch_times)
+        send_times = [t for _, t, _ in batch_times]
+        avg_send = sum(send_times) / len(send_times)
+        send_pcts = percentiles(send_times)
         print(f"  Среднее время отправки батча: {avg_send*1000:.0f}ms")
+        if send_pcts:
+            print(f"  Отправка батча: p50={send_pcts['p50']*1000:.0f}ms, p95={send_pcts['p95']*1000:.0f}ms, p99={send_pcts['p99']*1000:.0f}ms")
+
+    # Batch end-to-end latency (от POST до completion в polling)
+    completed_at = summary.get("completed_at", {})
+    batch_e2e_latencies: list[float] = []
+    for b in submitted_batches:
+        sent_at = b.get("sent_at")
+        if sent_at is None:
+            continue
+        tids = b["task_ids"]
+        completions = [completed_at[tid] for tid in tids if tid in completed_at]
+        if completions:
+            batch_e2e_latencies.append(max(completions) - sent_at)
+    if batch_e2e_latencies:
+        e2e_pcts = percentiles(batch_e2e_latencies)
+        avg_e2e = sum(batch_e2e_latencies) / len(batch_e2e_latencies)
+        print(f"  Batch e2e latency (POST → completed):")
+        print(f"    Avg:  {avg_e2e*1000:.0f}ms")
+        print(f"    p50:  {e2e_pcts['p50']*1000:.0f}ms, p95: {e2e_pcts['p95']*1000:.0f}ms, p99: {e2e_pcts['p99']*1000:.0f}ms")
+        print(f"    Min:  {min(batch_e2e_latencies)*1000:.0f}ms, Max: {max(batch_e2e_latencies)*1000:.0f}ms")
+
+    # Throughput
+    if submitted_batches and completed_at:
+        first_send = min(b["sent_at"] for b in submitted_batches if b.get("sent_at") is not None)
+        last_completion = max(completed_at.values())
+        wall_time = last_completion - first_send
+        if wall_time > 0:
+            throughput = total_results / wall_time
+            print(f"  Throughput: {throughput:.0f} msg/sec (wall time: {wall_time:.1f}s, total results: {total_results})")
 
     # Процент сообщений, выданных из кэша (по Postgres task_items.from_cache)
     stats = get_cache_stats_from_postgres(all_task_ids)
@@ -637,6 +831,18 @@ def run(
 
     print(f"  [Timing] DB validation: {(t_db1 - t_db0):.2f}s, Redis validation: {(t_redis1 - t_redis0):.2f}s")
 
+    # Single-message latency test
+    if single_latency_n > 0:
+        run_single_latency_test(
+            api_url=api_url,
+            texts=texts,
+            n_messages=single_latency_n,
+            poll_interval=poll_interval,
+            timeout=timeout,
+            mode=single_latency_mode,
+            dedup=single_latency_dedup,
+        )
+
     print("Готово.")
 
 
@@ -656,6 +862,19 @@ def main():
     p.add_argument("--poll-interval", type=float, default=0.2, help="Интервал опроса GET /tasks (сек)")
     p.add_argument("--timeout", type=float, default=120.0, help="Таймаут ожидания завершения всех задач (сек)")
     p.add_argument("--clear-cache", action="store_true", help="Перед прогоном очистить Redis-кэш модерации")
+    p.add_argument("--single-latency-n", type=int, default=0, help="После батч-теста: замерить e2e latency для N одиночных сообщений (POST /classify)")
+    p.add_argument(
+        "--single-latency-mode",
+        type=str,
+        default="cold-hot",
+        choices=["single", "cold-hot"],
+        help="Режим single latency: single (один прогон) или cold-hot (cold+hot на одном наборе).",
+    )
+    p.add_argument(
+        "--single-latency-no-dedup",
+        action="store_true",
+        help="Отключить дедупликацию single-тестовых текстов (по умолчанию dedup включен).",
+    )
     args = p.parse_args()
 
     run(
@@ -671,6 +890,9 @@ def main():
         poll_interval=args.poll_interval,
         timeout=args.timeout,
         clear_cache=args.clear_cache,
+        single_latency_n=args.single_latency_n,
+        single_latency_mode=args.single_latency_mode,
+        single_latency_dedup=not args.single_latency_no_dedup,
     )
 
 
