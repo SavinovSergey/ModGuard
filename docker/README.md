@@ -48,8 +48,10 @@ docker compose --profile telegram up -d
 
 В docker-compose для сервисов заданы:
 - `REDIS_URL=redis://redis:6379/0`
-- `DATABASE_URL=postgresql://postgres:postgres@postgres:5432/toxicfilter`
+- `DATABASE_URL=postgresql://postgres:postgres@postgres:5432/modguard`
 - `RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/`
+
+При старте **API** и **воркера** вызывается `init_db()` (таблицы `tasks` / `task_items`; при необходимости создаётся БД из имени в `DATABASE_URL`). Вручную: `python scripts/run/init_postgres.py` в корне репозитория.
 
 Для API и воркера также: `MODEL_TYPE`, `LOG_LEVEL`, `API_PREFIX`. Для Telegram-сервисов: `TELEGRAM_BOT_TOKEN` (из `.env` или окружения).
 
