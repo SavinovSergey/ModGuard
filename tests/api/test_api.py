@@ -53,7 +53,7 @@ def test_root_endpoint(client):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["service"] == "ToxicFilter"
+    assert data["service"] == "ModGuard"
     assert data["status"] == "running"
     assert "version" in data
 
