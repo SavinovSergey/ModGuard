@@ -3,6 +3,7 @@ import json
 import logging
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse
 
 from app.core.config import settings
 
@@ -45,6 +46,41 @@ def _get_connection():
     return psycopg2.connect(settings.database_url)
 
 
+def ensure_postgres_database_exists(database_url: str) -> None:
+    """
+    Если в DATABASE_URL указана БД, которой ещё нет на сервере, создаёт её.
+    Подключается к служебной БД postgres (те же host/user/password/query из URL).
+    Нужны права CREATEDB или суперпользователь. Для не-postgres схем URL — no-op.
+    """
+    parsed = urlparse(database_url)
+    if parsed.scheme not in ("postgresql", "postgres"):
+        return
+    path = (parsed.path or "").strip("/")
+    if not path:
+        return
+    db_name = path.split("/")[0]
+    if not db_name or db_name in ("postgres", "template0", "template1"):
+        return
+
+    import psycopg2
+    from psycopg2 import sql
+
+    maintenance = urlunparse(
+        (parsed.scheme, parsed.netloc, "/postgres", "", parsed.query, parsed.fragment)
+    )
+    conn = psycopg2.connect(maintenance)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
+            if cur.fetchone():
+                return
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
+            logger.info("Postgres: created database %s", db_name)
+    finally:
+        conn.close()
+
+
 @contextmanager
 def get_db_connection():
     """Контекстный менеджер соединения с Postgres."""
@@ -59,17 +95,23 @@ def get_db_connection():
         conn.close()
 
 
-def init_db() -> None:
-    """Создаёт таблицы tasks и task_items, если их ещё нет (данные не удаляются)."""
+def init_db() -> bool:
+    """
+    Создаёт БД (если нужно) и таблицы tasks/task_items, если их ещё нет.
+    Возвращает True при успехе. Данные не удаляются.
+    """
     if not settings.database_url:
-        return
+        return False
     try:
+        ensure_postgres_database_exists(settings.database_url)
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(CREATE_TABLES_SQL)
         logger.info("Postgres: tasks and task_items ready")
+        return True
     except Exception as e:
         logger.warning("Postgres init_db failed: %s", e)
+        return False
 
 
 def create_task_pg(

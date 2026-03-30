@@ -133,8 +133,11 @@ def main():
 
     logger.info("Starting listener (token set, rabbitmq required). In groups, disable bot Privacy Mode in BotFather so the bot receives all messages.")
     cache = create_cache(redis_url=settings.redis_url)
-    if settings.database_url:
-        init_db()
+    if settings.database_url and not init_db():
+        logger.error(
+            "Postgres init failed. Fix DATABASE_URL or run: python scripts/run/init_postgres.py"
+        )
+        sys.exit(1)
 
     run_listener_loop(token, cache, settings.database_url)
 

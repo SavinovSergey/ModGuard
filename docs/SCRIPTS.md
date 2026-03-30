@@ -147,6 +147,7 @@ python scripts/spam/train_spam.py \
 
 | Скрипт | Назначение |
 |--------|------------|
+| `scripts/run/init_postgres.py` | Инициализация Postgres: создаёт БД из `DATABASE_URL`, если её ещё нет, и таблицы `tasks` / `task_items` (то же, что делает `init_db()` при старте API/воркера). |
 | `scripts/run/run_worker.py` | Воркер классификации: потребляет очередь запросов (RabbitMQ), запускает токсичность + спам, пишет в Postgres/Redis, публикует в очередь результатов. |
 | `scripts/run/run_listener_telegram.py` | Listener для Telegram: приём сообщений, проверка кэша, публикация задач в очередь запросов. |
 | `scripts/run/run_actions_telegram.py` | Action-сервис Telegram: потребляет очередь результатов, выполняет действия (предупреждение, удаление и т.д.) по правилам площадки. |
@@ -156,6 +157,9 @@ python scripts/spam/train_spam.py \
 ### Примеры
 
 ```bash
+# Только Postgres: БД (при необходимости) + таблицы (нужен DATABASE_URL)
+python scripts/run/init_postgres.py
+
 # Воркер классификации (нужны RABBITMQ_URL, DATABASE_URL)
 python scripts/run/run_worker.py
 

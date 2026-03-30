@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # API
     api_version: str = "v1"
     api_prefix: str = "/api/v1"
-    api_title: str = "ToxicFilter API"
+    api_title: str = "ModGuard API"
     api_description: str = "API для классификации токсичности комментариев"
     
     # Производительность

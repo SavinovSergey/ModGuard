@@ -19,6 +19,12 @@ def database_url():
     url = os.environ.get("DATABASE_URL") or getattr(settings, "database_url", None)
     if not url:
         pytest.skip("DATABASE_URL not set")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(url)
+        conn.close()
+    except Exception as e:
+        pytest.skip(f"Postgres is not reachable for DATABASE_URL ({e})")
     return url
 
 
@@ -30,7 +36,7 @@ def task_id():
 def test_init_db(database_url):
     """init_db создаёт таблицу без ошибок."""
     from app.core.db import init_db
-    init_db()
+    assert init_db() is True
 
 
 def test_create_and_get_task_queued(database_url, task_id):

@@ -47,7 +47,11 @@ def main():
         logger.error("DATABASE_URL is not set")
         sys.exit(1)
 
-    init_db()
+    if not init_db():
+        logger.error(
+            "Postgres init failed. Fix DATABASE_URL or run: python scripts/run/init_postgres.py"
+        )
+        sys.exit(1)
 
     cache = create_cache(redis_url=settings.redis_url)
     classification_service = create_classification_service()

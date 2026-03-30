@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
     """Управление жизненным циклом (API: только очередь + task store)."""
     global task_store, _redis_client
 
-    logger.info("Starting ToxicFilter API (queue + task_id only)...")
+    logger.info("Starting ModGuard API (queue + task_id only)...")
 
     if settings.redis_url:
         try:
@@ -51,13 +51,17 @@ async def lifespan(app: FastAPI):
         task_store = TaskStore(None)
         app.state.moderation_cache = NoOpModerationCache()
 
-    if settings.database_url:
-        init_db()
+    if settings.database_url and not init_db():
+        raise RuntimeError(
+            "Не удалось инициализировать Postgres (БД и/или таблицы). "
+            "Проверьте DATABASE_URL, что сервер запущен, и права пользователя "
+            "(для автосоздания БД — CREATEDB). Либо выполните: python scripts/run/init_postgres.py"
+        )
 
     logger.info("API started (submit to queue, GET /tasks/{task_id} for result)")
     yield
 
-    logger.info("Shutting down ToxicFilter API...")
+    logger.info("Shutting down ModGuard API...")
     if _redis_client:
         try:
             _redis_client.close()
@@ -95,7 +99,7 @@ async def chat_page():
 @app.get("/", tags=["root"])
 async def root():
     return {
-        "service": "ToxicFilter",
+        "service": "ModGuard",
         "version": "0.1.0",
         "status": "running",
         "docs": "/docs",

@@ -1,3 +1,5 @@
+name: modguard
+
 version: '3.8'
 
 services:
@@ -5,14 +7,14 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-    container_name: toxicfilter-api
+    container_name: modguard-api
     ports:
       - "8000:8000"
     environment:
       - LOG_LEVEL=INFO
       - API_PREFIX=/api/v1
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/toxicfilter
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/modguard
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
     depends_on:
       redis:
@@ -33,7 +35,7 @@ services:
     build:
       context: .
       dockerfile: docker/frontend/Dockerfile
-    container_name: toxicfilter-frontend
+    container_name: modguard-frontend
     ports:
       - "8080:80"
     depends_on:
@@ -45,13 +47,13 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
-    container_name: toxicfilter-worker
+    container_name: modguard-worker
     command: ["python", "scripts/run/run_worker.py"]
     environment:
       - MODEL_TYPE=regex
       - LOG_LEVEL=INFO
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/toxicfilter
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/modguard
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
     depends_on:
       redis:
@@ -72,7 +74,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: toxicfilter-redis
+    container_name: modguard-redis
     ports:
       - "6379:6379"
     volumes:
@@ -82,11 +84,11 @@ services:
 
   postgres:
     image: postgres:15-alpine
-    container_name: toxicfilter-postgres
+    container_name: modguard-postgres
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=toxicfilter
+      - POSTGRES_DB=modguard
     ports:
       - "5432:5432"
     volumes:
@@ -100,7 +102,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
-    container_name: toxicfilter-rabbitmq
+    container_name: modguard-rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -118,12 +120,12 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-    container_name: toxicfilter-listener-telegram
+    container_name: modguard-listener-telegram
     command: ["python", "scripts/run/run_listener_telegram.py"]
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/toxicfilter
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/modguard
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
     depends_on:
       redis:
@@ -146,7 +148,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-    container_name: toxicfilter-actions-telegram
+    container_name: modguard-actions-telegram
     command: ["python", "scripts/run/run_actions_telegram.py"]
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
@@ -166,7 +168,13 @@ services:
 
 volumes:
   redis_data:
+    name: modguard_redis_data
   postgres_data:
+    name: modguard_postgres_data
+
+networks:
+  default:
+    name: modguard_default
 
 
 
