@@ -38,7 +38,7 @@ except LookupError:
     stop_words = set(stopwords.words('russian'))
 
 
-@lru_cache(maxsize=1000)
+@lru_cache(maxsize=100000)
 def _lemmatize_word(word: str) -> str:
     """Лемматизация одного слова с кэшированием"""
     try:
