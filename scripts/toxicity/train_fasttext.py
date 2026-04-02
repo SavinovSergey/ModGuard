@@ -26,7 +26,7 @@ from scripts.shared.cli import (
     add_common_output_arg,
     add_common_random_state_arg,
 )
-from scripts.shared.common import find_optimal_threshold
+from scripts.shared.common import find_threshold_max_f1_min_precision
 from scripts.shared.data import load_train_val_data, prepare_texts_classical
 
 
@@ -63,7 +63,9 @@ class FastTextModelTrainer:
         min_precision: float = 0.9,
     ) -> tuple:
         """Backward-compatible wrapper around shared threshold search."""
-        return find_optimal_threshold(y_true, y_proba, min_precision=min_precision)
+        return find_threshold_max_f1_min_precision(
+            y_true, y_proba, min_precision=min_precision
+        )
     
     def prepare_data(self, df: pd.DataFrame, text_col: str = 'text', label_col: str = 'label'):
         """
@@ -277,14 +279,13 @@ class FastTextModelTrainer:
             y_proba = np.array([p[0] if l[0].endswith('1') else 1 - p[0] for l, p in zip(labels, probas)])
             y_true = y_train
         
-        # Подбираем оптимальный порог для максимизации recall при Precision >= 90%
-        self.optimal_threshold, opt_precision, opt_recall = find_optimal_threshold(
+        # Подбираем оптимальный порог для максимизации F1 при Precision >= 90%
+        self.optimal_threshold, opt_precision, opt_recall, opt_f1 = find_threshold_max_f1_min_precision(
             y_true, y_proba, min_precision=0.9
         )
         
         # Вычисляем метрики с оптимальным порогом
         y_pred_optimal = (y_proba >= self.optimal_threshold).astype(int)
-        opt_f1 = f1_score(y_true, y_pred_optimal, zero_division=0)
         roc_auc = roc_auc_score(y_true, y_proba)
         ap_score = average_precision_score(y_true, y_proba)
         
