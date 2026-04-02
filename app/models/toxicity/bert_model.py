@@ -31,7 +31,7 @@ class BERTModel(NeuralTextModelBase):
         batch_size: Optional[int] = 32,
         use_onnx: Optional[bool] = None,
     ):
-        super().__init__(model_name="bert", model_type="bert")
+        super().__init__(model_name="bert", model_type="bert", remove_punctuation=True)
         self.model_path = model_path
         self.hf_model_name = model_name  # Сохраняем имя модели из HuggingFace отдельно
         self.max_length = max_length or 512
@@ -240,7 +240,8 @@ class BERTModel(NeuralTextModelBase):
             self.model = self.model.to(self.device)
             self.model.eval()
             self._num_labels = getattr(self.model.config, "num_labels", 1)
-        
+
+        self.set_remove_punctuation(bool(self.model_params.get("remove_punctuation", True)))
         self.is_loaded = True
         logger.info(f"Модель загружена ({'ONNX' if self._is_onnx else 'PyTorch'}) на устройство: {self.device}")
     
@@ -417,6 +418,7 @@ class BERTModel(NeuralTextModelBase):
                 'max_length': self.max_length,
                 'device': self.device,
                 'is_onnx': self._is_onnx,
+                'remove_punctuation': self.remove_punctuation,
             }
         )
         return info

@@ -79,9 +79,22 @@ class ClassicalTextModelBase(BaseToxicityModel, ABC):
 class NeuralTextModelBase(BaseToxicityModel, ABC):
     """Base for neural wrappers using normalization-only preprocessing."""
 
-    def __init__(self, model_name: str, model_type: str):
+    def __init__(self, model_name: str, model_type: str, remove_punctuation: bool = True):
         super().__init__(model_name=model_name, model_type=model_type)
-        self.text_processor = TextProcessor(use_lemmatization=False, remove_stopwords=False)
+        self.remove_punctuation = bool(remove_punctuation)
+        self._init_neural_text_processor()
+
+    def _init_neural_text_processor(self) -> None:
+        self.text_processor = TextProcessor(
+            use_lemmatization=False,
+            remove_stopwords=False,
+            remove_punkt=self.remove_punctuation,
+        )
+
+    def set_remove_punctuation(self, value: bool) -> None:
+        """Согласовать нормализацию с обучением (поле remove_punctuation в params.json)."""
+        self.remove_punctuation = bool(value)
+        self._init_neural_text_processor()
 
     def preprocess_text(self, text: str) -> str:
         if text is None or not isinstance(text, str):

@@ -67,10 +67,15 @@ def prepare_texts_neural(
     df: pd.DataFrame,
     text_col: str = "text",
     label_col: str = "label",
+    remove_punctuation: bool = True,
 ) -> tuple[list[str], np.ndarray]:
     """Preprocess data for RNN/BERT using normalization only."""
     print("Preprocessing text...")
-    processor = TextProcessor(use_lemmatization=False, remove_stopwords=False)
+    processor = TextProcessor(
+        use_lemmatization=False,
+        remove_stopwords=False,
+        remove_punkt=remove_punctuation,
+    )
     frame = df.copy()
     frame["processed_text"] = frame[text_col].apply(processor.normalize)
     frame = frame[frame["processed_text"].str.len() > 0]
@@ -79,6 +84,7 @@ def prepare_texts_neural(
     y = frame[label_col].values.astype(np.float32)
 
     print(f"Prepared {len(x)} examples")
+    print(f"Remove punctuation: {remove_punctuation}")
     print(f"Class distribution: {np.bincount(y.astype(int))}")
     print(f"Unique label values: {np.unique(y)}")
     return x, y

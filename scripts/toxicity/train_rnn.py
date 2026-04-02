@@ -77,7 +77,8 @@ class RNNModelTrainer:
         lr_schedule_patience: int = 2,
         lr_schedule_factor: float = 0.5,
         device: str = None,
-        random_state: int = 42
+        random_state: int = 42,
+        remove_punctuation: bool = True,
     ):
         """
         Args:
@@ -109,6 +110,7 @@ class RNNModelTrainer:
             lr_schedule_factor: Фактор уменьшения learning rate для scheduler (для plateau - множитель, для lambda - коэффициент экспоненциального затухания)
             device: Устройство для вычислений
             random_state: Random state для воспроизводимости
+            remove_punctuation: Удалять пунктуацию в TextProcessor.normalize (как для классических моделей)
         """
         self.tokenizer_type = tokenizer_type
         self.rnn_type = rnn_type
@@ -138,7 +140,8 @@ class RNNModelTrainer:
         self.lr_schedule_factor = lr_schedule_factor
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.random_state = random_state
-        
+        self.remove_punctuation = remove_punctuation
+
         self.tokenizer = None
         self.model = None
         self.best_model_state = None
@@ -181,7 +184,12 @@ class RNNModelTrainer:
         Returns:
             X_processed, y
         """
-        return prepare_texts_neural(df, text_col=text_col, label_col=label_col)
+        return prepare_texts_neural(
+            df,
+            text_col=text_col,
+            label_col=label_col,
+            remove_punctuation=self.remove_punctuation,
+        )
     
     def train_tokenizer(self, texts: List[str]) -> None:
         """
@@ -590,6 +598,7 @@ class RNNModelTrainer:
                 'best_score_metric': 'average_precision',
                 'optimal_threshold': self.optimal_threshold,
                 'random_state': self.random_state,
+                'remove_punctuation': self.remove_punctuation,
                 'loss_type': self.loss_type,
                 'focal_gamma': self.focal_gamma,
                 'focal_alpha': self.focal_alpha,
@@ -706,6 +715,11 @@ def main():
     parser.set_defaults(use_cv=True)
     add_common_loss_args(parser)
     parser.add_argument(
+        '--keep-punctuation',
+        action='store_true',
+        help='Не удалять пунктуацию при подготовке текста (TextProcessor.remove_punkt=False)',
+    )
+    parser.add_argument(
         '--no-focal-auto-alpha',
         action='store_false',
         dest='focal_auto_alpha',
@@ -814,6 +828,7 @@ def main():
         lr_schedule_patience=args.lr_schedule_patience,
         lr_schedule_factor=args.lr_schedule_factor,
         random_state=args.random_state,
+        remove_punctuation=not args.keep_punctuation,
     )
     
     # Подготовка данных

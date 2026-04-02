@@ -29,7 +29,7 @@ class RNNModel(NeuralTextModelBase):
         max_length: Optional[int] = None,
         batch_size: Optional[int] = 64
     ):
-        super().__init__(model_name="rnn", model_type="rnn")
+        super().__init__(model_name="rnn", model_type="rnn", remove_punctuation=True)
         self.model_path = model_path
         self.tokenizer_path = tokenizer_path
         self.hf_model_name = hf_model_name
@@ -267,6 +267,7 @@ class RNNModel(NeuralTextModelBase):
         self.model_path = model_path
         self.tokenizer_path = tokenizer_path
 
+        self.set_remove_punctuation(bool(self.model_params.get("remove_punctuation", True)))
         self.is_loaded = True
         logger.info(f"RNN модель загружена из {model_path}, токенизатор из {tokenizer_path}, устройство: {self.device}")
 
@@ -396,6 +397,7 @@ class RNNModel(NeuralTextModelBase):
                 'rnn_type': self.rnn_type,
                 'max_length': self.max_length,
                 'device': str(self.device),
+                'remove_punctuation': self.remove_punctuation,
             }
         )
         

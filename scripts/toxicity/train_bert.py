@@ -113,7 +113,8 @@ class BERTModelTrainer:
         focal_auto_alpha: Optional[bool] = True,
         reduction: Optional[str] = "mean",
         max_grad_norm: float = 1.0,
-        random_state: int = 42
+        random_state: int = 42,
+        remove_punctuation: bool = True,
     ):
         """
         Args:
@@ -138,6 +139,7 @@ class BERTModelTrainer:
             reduction: Агрегация лосса
             max_grad_norm: Максимальная норма градиента для clipping (0.0 = отключен)
             random_state: Random state для воспроизводимости
+            remove_punctuation: Удалять пунктуацию в TextProcessor.normalize при подготовке данных
         """
         self.model_name = model_name
         self.max_length = max_length
@@ -162,7 +164,8 @@ class BERTModelTrainer:
         self.focal_alpha = focal_alpha
         self.focal_auto_alpha = focal_auto_alpha
         self.reduction = reduction
-        
+        self.remove_punctuation = remove_punctuation
+
         self.tokenizer = None
         self.model = None
         self.best_score = 0.0
@@ -211,7 +214,12 @@ class BERTModelTrainer:
         Returns:
             X_processed, y
         """
-        return prepare_texts_neural(df, text_col=text_col, label_col=label_col)
+        return prepare_texts_neural(
+            df,
+            text_col=text_col,
+            label_col=label_col,
+            remove_punctuation=self.remove_punctuation,
+        )
     
     def load_model_and_tokenizer(self):
         """Загружает модель и токенизатор"""
@@ -635,6 +643,7 @@ class BERTModelTrainer:
             'focal_gamma': self.focal_gamma,
             'focal_alpha': self.focal_alpha,
             'focal_auto_alpha': self.focal_auto_alpha,
+            'remove_punctuation': self.remove_punctuation,
         }
         
         # Преобразуем numpy типы
@@ -749,6 +758,11 @@ def main():
         help='Количество последних слоев для заморозки (0 = разморозить только последний слой)'
     )
     add_common_random_state_arg(parser)
+    parser.add_argument(
+        '--keep-punctuation',
+        action='store_true',
+        help='Не удалять пунктуацию при подготовке текста (TextProcessor.remove_punkt=False)',
+    )
     add_common_loss_args(parser)
     parser.set_defaults(focal_auto_alpha=True)
     parser.add_argument(
@@ -799,7 +813,8 @@ def main():
         focal_alpha=args.focal_alpha,
         focal_auto_alpha=args.focal_auto_alpha,
         max_grad_norm=args.max_grad_norm,
-        random_state=args.random_state
+        random_state=args.random_state,
+        remove_punctuation=not args.keep_punctuation,
     )
     
     # Подготовка данных
