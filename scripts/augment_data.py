@@ -162,6 +162,13 @@ def main():
         print(f"\nФильтрация данных: индексы {start_idx} - {end_idx}")
         df = df.iloc[start_idx:end_idx].copy()
         print(f"Осталось {len(df)} примеров для обработки")
+
+    # Сортировка по длине текста (убывание) для уменьшения паддингов в батчах.
+    # Порядок будет восстановлен перед сохранением.
+    orig_order = df.index.to_numpy()
+    text_lengths = df[args.text_col].astype(str).str.len()
+    sorted_idx = text_lengths.sort_values(ascending=False).index
+    df = df.loc[sorted_idx].copy()
     
     # Создание аугментера
     print(f"\nИнициализация аугментера...")
@@ -219,6 +226,17 @@ def main():
         )
     
     # Сохранение результата
+    # Возвращаем исходный порядок и не сохраняем служебные данные.
+    if len(df_augmented) > len(orig_order):
+        original_part = df_augmented.iloc[:len(orig_order)].copy()
+        augmented_part = df_augmented.iloc[len(orig_order):].copy()
+        original_part.index = sorted_idx
+        original_part = original_part.reindex(orig_order)
+        df_augmented = pd.concat([original_part, augmented_part], ignore_index=True)
+    else:
+        df_augmented.index = sorted_idx
+        df_augmented = df_augmented.reindex(orig_order).reset_index(drop=True)
+
     print(f"\nСохранение результата в {output_path}...")
     df_augmented.to_parquet(output_path, index=False)
     print(f"Сохранено {len(df_augmented)} примеров")
