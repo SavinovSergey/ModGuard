@@ -1,23 +1,38 @@
 #!/usr/bin/env python3
 """
-Валидация цепочки: API → очередь → бэкенд → Postgres/кэш.
+Валидация цепочки: API → очередь → воркер → Postgres/кэш.
 
-Загружает тексты из parquet, накапливает батчи (каждые 5–50 ms добавляется одно сообщение;
-батч отправляется при 50 сообщениях или 3 с с момента первого), отправляет POST /classify/batch-async,
-опрашивает GET /tasks/{task_id} до завершения. Часть сообщений можно отправить повторно для проверки кэша.
+Загружает тексты из parquet/csv, отправляет батчами через POST /classify/batch-async,
+опрашивает GET /tasks/{task_id} до завершения. Часть сообщений отправляется повторно
+(дубликаты) для проверки кэша; в отчёте сравниваются cold-батчи (первая волна) и hot-батчи
+(содержат повтор). После батч-теста — single-message latency с логом пауз опроса (poll_interval).
+
+Метрики e2e latency и from_cache берутся из Postgres (tasks.created_at / completed_at,
+task_items.from_cache). DATABASE_URL скрипта должен совпадать с тем, куда пишут API/воркер.
+
+При наличии колонки с метками (по умолчанию label: 1/0 или true/false — класс «токсично»)
+после батч-прогона считаются Precision / Recall / F1 по полю is_toxic ответа API
+(и по is_spam, если задана --spam-label-col). Для корректного объединения результатов
+при частичном попадании в Redis-кэш у скрипта должен быть тот же REDIS_URL, что у API.
 
 Запуск:
-  python scripts/run/validate_chain.py --val-data data/val.parquet --max-samples 200
-  python scripts/run/validate_chain.py --val-data data/val.parquet -n 500 --duplicate-ratio 0.2
-  python scripts/run/validate_chain.py --val-data data/val.parquet -n 200 --duplicate-after-sec 30
+  python scripts/run/validate_chain.py --val-data data/toxicity/val.parquet -n 200
+  python scripts/run/validate_chain.py --val-data data/toxicity/val.parquet --batch-size 1000 --clear-cache
+  python scripts/run/validate_chain.py --val-data data/toxicity/val.parquet --label-col label
+  python scripts/run/validate_chain.py ... --label-col "" --spam-label-col is_spam   # только спам
+  python scripts/run/validate_chain.py --val-data data/toxicity/val.parquet --single-latency-n 500
 """
 import argparse
-import os
-import hashlib
+import math
 import random
 import sys
+import os
 import time
+from collections import Counter
 from pathlib import Path
+from typing import Any
+
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 _root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_root))
@@ -26,364 +41,243 @@ os.chdir(_root)
 import requests
 from tqdm import tqdm
 
-from typing import Any, Iterable
 
+# ---------------------------------------------------------------------------
+# Утилиты
+# ---------------------------------------------------------------------------
 
 def percentiles(values: list[float], ps: tuple[int, ...] = (50, 95, 99)) -> dict[str, float]:
-    """Вычисляет процентили (линейная интерполяция)."""
     if not values:
         return {}
     s = sorted(values)
     n = len(s)
-    result = {}
+    out = {}
     for p in ps:
         k = (n - 1) * p / 100
-        f = int(k)
-        c = min(f + 1, n - 1)
-        result[f"p{p}"] = s[f] + (k - f) * (s[c] - s[f])
-    return result
-
-def count_batches(
-    events: list[tuple[float, int, bool]],
-    batch_size: int,
-    batch_window_sec: float,
-) -> int:
-    """Подсчёт числа батчей по той же логике, что и в основном цикле (flush по размеру или по времени)."""
-    n_batches = 0
-    batch_len = 0
-    batch_first_time = None
-    for event_time, idx, _ in events:
-        batch_len += 1
-        if batch_first_time is None:
-            batch_first_time = event_time
-        now = event_time
-        flush = batch_len >= batch_size or (now - batch_first_time) >= batch_window_sec
-        if flush:
-            n_batches += 1
-            batch_len = 0
-            batch_first_time = None
-    if batch_len > 0:
-        n_batches += 1
-    return n_batches
+        lo = int(k)
+        hi = min(lo + 1, n - 1)
+        out[f"p{p}"] = s[lo] + (k - lo) * (s[hi] - s[lo])
+    return out
 
 
-def get_cache_stats_from_postgres(task_ids: list[str]) -> tuple[int, int] | None:
-    """Возвращает (число из кэша, всего сообщений) по task_ids в task_items, или None при ошибке/нет БД."""
-    from app.core.config import settings
-    from app.core.db import get_db_connection
-    if not settings.database_url or not task_ids:
+def _fmt_pcts(pcts: dict[str, float]) -> str:
+    return ", ".join(f"{k}={v * 1000:.0f}ms" for k, v in pcts.items())
+
+
+def _cell_to_bool_label(v: Any) -> bool | None:
+    if v is None:
         return None
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(int(v))
+    s = str(v).strip().lower()
+    if s in ("", "nan", "none"):
+        return None
+    if s in ("0", "false", "no", "neg", "non-toxic", "clean", "ham", "not_spam"):
+        return False
+    if s in ("1", "true", "yes", "pos", "toxic", "spam"):
+        return True
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT from_cache, COUNT(*) FROM task_items WHERE task_id = ANY(%s) GROUP BY from_cache",
-                    (task_ids,),
-                )
-                rows = cur.fetchall()
-        n_cache = sum(c for from_cache, c in rows if from_cache)
-        n_total = sum(c for _, c in rows)
-        return (n_cache, n_total)
-    except Exception as e:
-        print(f"  Запрос процента из кэша: {e}")
+        return bool(int(float(s)))
+    except ValueError:
         return None
 
 
-def _cache_key(text: str) -> str:
-    """Ключ модерационного кэша (должен совпадать с app/core/cache.py)."""
-    from app.core.cache import CACHE_KEY_PREFIX
+def load_validation_rows(
+    path: Path,
+    max_samples: int | None,
+    label_col: str | None,
+    spam_label_col: str | None,
+) -> tuple[list[str], list[bool | None], list[bool | None]]:
+    """Тексты и опциональные метки токсичности / спама (None — строка без метки)."""
+    import pandas as pd
 
-    normalized = (text or "").strip().lower()
-    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-    return f"{CACHE_KEY_PREFIX}{h}"
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Файл не найден: {p}")
+    df = pd.read_csv(p) if p.suffix.lower() == ".csv" else pd.read_parquet(p)
+    if max_samples is not None:
+        df = df.iloc[:max_samples]
+    texts = df["text"].astype(str).tolist()
+
+    tox_labels: list[bool | None] = [None] * len(texts)
+    if label_col and label_col in df.columns:
+        tox_labels = [_cell_to_bool_label(x) for x in df[label_col].tolist()]
+    elif label_col:
+        print(f"  [metrics] Колонка «{label_col}» не найдена — P/R/F1 не считаются.")
+
+    spam_labels: list[bool | None] = [None] * len(texts)
+    if spam_label_col:
+        if spam_label_col in df.columns:
+            spam_labels = [_cell_to_bool_label(x) for x in df[spam_label_col].tolist()]
+        else:
+            print(f"  [metrics] Колонка «{spam_label_col}» не найдена — P/R/F1 по спаму не считаются.")
+
+    return texts, tox_labels, spam_labels
 
 
-def get_postgres_task_items_quality_stats(task_ids: list[str]) -> dict[str, Any]:
-    """
-    Возвращает метрики качества для task_items по task_ids:
-      - n_items
-      - n_invalid_* (пропуски/выход за диапазон/несогласованность model_used с флагами)
-      - n_error_items
-    """
+def _moderation_cache_for_alignment():
+    """Тот же Redis, что у API — для выравнивания частичного кэша (два task_id)."""
+    import redis
+    from app.core.cache import ModerationCache
     from app.core.config import settings
-    from app.core.db import get_db_connection
-
-    if not settings.database_url or not task_ids:
-        return {}
-
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        t.task_id,
-                        t.status,
-                        COUNT(*) AS n_items,
-                        SUM(CASE WHEN ti.is_toxic IS NULL THEN 1 ELSE 0 END) AS n_missing_toxic,
-                        SUM(CASE WHEN ti.toxicity_score IS NULL OR ti.toxicity_score < 0 OR ti.toxicity_score > 1 THEN 1 ELSE 0 END) AS n_bad_toxic_score,
-                        SUM(CASE
-                            WHEN ti.tox_model_used IS NULL
-                                 AND (ti.is_toxic IS TRUE OR COALESCE(ti.toxicity_score, 0) <> 0)
-                            THEN 1 ELSE 0
-                        END) AS n_bad_toxic_model_used,
-                        SUM(CASE WHEN ti.is_spam IS NULL THEN 1 ELSE 0 END) AS n_missing_spam,
-                        SUM(CASE WHEN ti.spam_score IS NULL OR ti.spam_score < 0 OR ti.spam_score > 1 THEN 1 ELSE 0 END) AS n_bad_spam_score,
-                        SUM(CASE
-                            WHEN ti.spam_model_used IS NULL
-                                 AND (ti.is_spam IS TRUE OR COALESCE(ti.spam_score, 0) <> 0)
-                            THEN 1 ELSE 0
-                        END) AS n_bad_spam_model_used,
-                        SUM(CASE WHEN ti.error IS NOT NULL THEN 1 ELSE 0 END) AS n_error_items
-                    FROM tasks t
-                    JOIN task_items ti ON ti.task_id = t.task_id
-                    WHERE t.task_id = ANY(%s)
-                    GROUP BY t.task_id, t.status
-                    """,
-                    (task_ids,),
-                )
-                rows = cur.fetchall()
-
-        out: dict[str, Any] = {}
-        for (
-            task_id,
-            status,
-            n_items,
-            n_missing_toxic,
-            n_bad_toxic_score,
-            n_bad_toxic_model_used,
-            n_missing_spam,
-            n_bad_spam_score,
-            n_bad_spam_model_used,
-            n_error_items,
-        ) in rows:
-            out[str(task_id)] = {
-                "status": status,
-                "n_items": int(n_items),
-                "n_invalid_toxic": int(n_missing_toxic + n_bad_toxic_score + n_bad_toxic_model_used),
-                "n_invalid_spam": int(n_missing_spam + n_bad_spam_score + n_bad_spam_model_used),
-                "n_error_items": int(n_error_items),
-            }
-        return out
-    except Exception as e:
-        print(f"  [DB] Ошибка при проверке task_items: {e}")
-        return {}
-
-
-def _validate_redis_cache_for_task_items(task_ids: list[str]) -> dict[str, Any]:
-    """Проверяет, что Redis содержит кэш для тех task_items, где заполнен tox_model_used/spam_model_used."""
-    from app.core.config import settings
-    from app.core.db import get_db_connection
 
     if not settings.redis_url:
-        return {"enabled": False, "reason": "REDIS_URL not set"}
-    if not task_ids:
-        return {"enabled": False, "reason": "no task_ids"}
-
+        return None
     try:
-        import redis
-
         client = redis.from_url(settings.redis_url, decode_responses=True)
         client.ping()
-    except Exception as e:
-        return {"enabled": False, "reason": f"Redis connect failed: {e}"}
-
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT text, tox_model_used, spam_model_used
-                    FROM task_items
-                    WHERE task_id = ANY(%s) AND text IS NOT NULL AND text <> ''
-                    """,
-                    (task_ids,),
-                )
-                rows = cur.fetchall()
-    except Exception as e:
-        return {"enabled": False, "reason": f"DB read failed for cache check: {e}"}
-
-    # key -> observed model types across task_items
-    # (один и тот же текст может встречаться многократно в разных task_id)
-    key_to_models: dict[str, dict[str, set[str]]] = {}
-    for text, tox_model_used, spam_model_used in rows:
-        if tox_model_used is None and spam_model_used is None:
-            continue
-        key = _cache_key(str(text))
-        if key not in key_to_models:
-            key_to_models[key] = {"tox_models": set(), "spam_models": set()}
-        if tox_model_used is not None:
-            key_to_models[key]["tox_models"].add(str(tox_model_used))
-        if spam_model_used is not None:
-            key_to_models[key]["spam_models"].add(str(spam_model_used))
-
-    uniq_keys = list(key_to_models.keys())
-    if not uniq_keys:
-        return {"enabled": True, "checked_keys": 0, "found_keys": 0, "missing_keys": 0}
-
-    try:
-        values: list[Any] = client.mget(uniq_keys)
-        found_keys = sum(1 for v in values if v is not None)
-        missing_keys = len(uniq_keys) - found_keys
-
-        def _cat_from_models(models: set[str]) -> str:
-            if not models:
-                return "none"
-            if "regex" in models:
-                return "regex"
-            if "tfidf" in models:
-                return "tfidf"
-            return "other"
-
-        # Группируем отсутствующие ключи по типам моделей.
-        missing_by_tox_cat: dict[str, int] = {}
-        missing_by_spam_cat: dict[str, int] = {}
-        missing_examples: list[dict[str, Any]] = []
-        for i, v in enumerate(values):
-            if v is not None:
-                continue
-            key = uniq_keys[i]
-            models = key_to_models.get(key) or {"tox_models": set(), "spam_models": set()}
-            tox_cat = _cat_from_models(models.get("tox_models") or set())
-            spam_cat = _cat_from_models(models.get("spam_models") or set())
-            missing_by_tox_cat[tox_cat] = missing_by_tox_cat.get(tox_cat, 0) + 1
-            missing_by_spam_cat[spam_cat] = missing_by_spam_cat.get(spam_cat, 0) + 1
-            if len(missing_examples) < 5:
-                # ключ целиком длинный; печатаем только последние 8 символов для удобства
-                missing_examples.append(
-                    {
-                        "key_tail": key[-8:],
-                        "tox_cat": tox_cat,
-                        "spam_cat": spam_cat,
-                        "tox_models": sorted(list(models.get("tox_models") or set())),
-                        "spam_models": sorted(list(models.get("spam_models") or set())),
-                    }
-                )
-
-        # На небольшом подмножестве проверим, что payload валиден:
-        #  - json
-        #  - scores в диапазоне
-        #  - типы полей
-        sample_indices = [i for i, v in enumerate(values) if v is not None][:50]
-        sample_ok = 0
-        sample_errors: list[str] = []
-        for i in sample_indices:
-            raw = values[i]
-            try:
-                payload = __import__("json").loads(raw)
-                tox_score = float(payload.get("toxicity_score", 0.0))
-                spam_score = float(payload.get("spam_score", 0.0))
-                is_toxic = payload.get("is_toxic")
-                is_spam = payload.get("is_spam")
-
-                if not (
-                    0.0 <= tox_score <= 1.0
-                    and 0.0 <= spam_score <= 1.0
-                    and isinstance(is_toxic, bool)
-                    and isinstance(is_spam, bool)
-                ):
-                    raise ValueError("score/type out of range")
-
-                if (
-                    "toxicity_types" not in payload
-                    or "tox_model_used" not in payload
-                    or "spam_model_used" not in payload
-                ):
-                    raise ValueError("missing expected fields")
-
-                tox_types = payload.get("toxicity_types", {})
-                if not isinstance(tox_types, dict):
-                    raise ValueError("toxicity_types is not dict")
-                for _, v in tox_types.items():
-                    vv = float(v)
-                    if not (0.0 <= vv <= 1.0):
-                        raise ValueError("toxicity_types value out of range")
-
-                spam_model_used = payload.get("spam_model_used")
-                tox_model_used = payload.get("tox_model_used")
-                if tox_model_used is not None and not isinstance(tox_model_used, str):
-                    raise ValueError("tox_model_used type invalid")
-                if spam_model_used is not None and not isinstance(spam_model_used, str):
-                    raise ValueError("spam_model_used type invalid")
-
-                # Проверим согласованность model_used со значениями из task_items
-                key = uniq_keys[i]
-                models = key_to_models.get(key) or {"tox_models": set(), "spam_models": set()}
-                tox_expected = models.get("tox_models") or set()
-                spam_expected = models.get("spam_models") or set()
-                if tox_model_used is not None and str(tox_model_used) not in tox_expected and tox_expected:
-                    raise ValueError(f"tox_model_used mismatch: got={tox_model_used} expected={sorted(list(tox_expected))[:3]}")
-                if spam_model_used is not None and str(spam_model_used) not in spam_expected and spam_expected:
-                    raise ValueError(
-                        f"spam_model_used mismatch: got={spam_model_used} expected={sorted(list(spam_expected))[:3]}"
-                    )
-
-                sample_ok += 1
-            except Exception as e:
-                sample_errors.append(f"{uniq_keys[i][-8:]}: {e}")
-
-        return {
-            "enabled": True,
-            "checked_keys": len(uniq_keys),
-            "found_keys": found_keys,
-            "missing_keys": missing_keys,
-            "missing_by_tox_cat": missing_by_tox_cat,
-            "missing_by_spam_cat": missing_by_spam_cat,
-            "missing_examples": missing_examples,
-            "sample_ok": sample_ok,
-            "sample_errors": sample_errors[:5],
-        }
-    except Exception as e:
-        return {"enabled": False, "reason": f"Redis mget failed: {e}"}
+        return ModerationCache(client)
+    except Exception:
+        return None
 
 
-def load_texts(path: Path, max_samples: int | None) -> list[str]:
-    """Загружает колонку text из parquet (или csv). Ограничивает число строк через max_samples."""
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Файл не найден: {path}")
-    import pandas as pd
-    if path.suffix.lower() == ".csv":
-        df = pd.read_csv(path)
-    else:
-        df = pd.read_parquet(path, columns=["text"])
-    texts = df["text"].astype(str).tolist()
-    if max_samples is not None:
-        texts = texts[: max_samples]
-    return texts
+def _print_binary_metrics(name: str, y_true: list[bool], y_pred: list[bool]) -> None:
+    if not y_true:
+        return
+    pr = precision_score(y_true, y_pred, pos_label=True, zero_division=0)
+    rc = recall_score(y_true, y_pred, pos_label=True, zero_division=0)
+    f1 = f1_score(y_true, y_pred, pos_label=True, zero_division=0)
+    print(f"  {name}: Precision={pr:.4f}, Recall={rc:.4f}, F1={f1:.4f} (n={len(y_true)})")
 
 
-def send_batch(api_url: str, items: list[str], prefix: str) -> tuple[list[str], int]:
-    """POST /classify/batch-async. Возвращает (список task_id для опроса, статус-код)."""
+def _print_latency_bucket(title: str, values: list[float]) -> None:
+    if not values:
+        print(f"  {title}: нет данных")
+        return
+    pcts = percentiles(values)
+    avg = sum(values) / len(values)
+    print(
+        f"  {title}: n={len(values)}, avg={avg * 1000:.0f}ms, {_fmt_pcts(pcts)}, "
+        f"min={min(values) * 1000:.0f}ms, max={max(values) * 1000:.0f}ms"
+    )
+
+
+# ---------------------------------------------------------------------------
+# API-клиент
+# ---------------------------------------------------------------------------
+
+def send_batch(api_url: str, items: list[tuple[str, int]]) -> tuple[list[str], int]:
+    """items: (text, row_index) — row_index уходит в id для отладки; порядок = порядок в батче."""
     url = f"{api_url.rstrip('/')}/api/v1/classify/batch-async"
-    payload = {"items": [{"text": t} for t in items], "source": "validate_chain"}
+    payload = {
+        "items": [{"text": t, "id": str(ri)} for t, ri in items],
+        "source": "validate_chain",
+    }
     try:
         r = requests.post(url, json=payload, timeout=30)
         if r.status_code != 200:
             return [], r.status_code
         data = r.json()
-        if data.get("task_ids"):
-            task_ids = list(data["task_ids"])
-        else:
-            task_ids = [data["task_id"]]
-        return task_ids, r.status_code
+        tids = data.get("task_ids")
+        if tids:
+            return list(tids), r.status_code
+        return [data["task_id"]], r.status_code
     except Exception as e:
-        print(f"{prefix} Ошибка запроса: {e}")
+        print(f"  [batch] Ошибка: {e}")
         return [], 0
+
+
+def fetch_task_results(api_url: str, task_id: str) -> tuple[str, list[dict[str, Any]] | None]:
+    """(status, results | None)."""
+    url = f"{api_url.rstrip('/')}/api/v1/tasks/{task_id}"
+    try:
+        r = requests.get(url, timeout=30)
+        if r.status_code != 200:
+            return "error", None
+        data = r.json()
+        st = data.get("status", "")
+        if st != "completed":
+            return st, None
+        raw = data.get("results") or []
+        return st, raw if isinstance(raw, list) else []
+    except Exception as e:
+        print(f"  [metrics] GET task {task_id[:8]}…: {e}")
+        return "error", None
+
+
+def merge_batch_predictions(
+    block: dict[str, Any],
+    results_by_tid: dict[str, list[dict[str, Any]]],
+    align_cache: Any,
+) -> list[tuple[int, bool, bool]] | None:
+    """
+    Сопоставляет результаты с индексами строк датасета.
+    block: indices, items (texts), task_ids, cache_hits (на момент отправки).
+    Возвращает список (row_idx, pred_is_toxic, pred_is_spam) или None, если выравнивание невозможно.
+    """
+    indices: list[int] = block["indices"]
+    items: list[str] = block["items"]
+    tids: list[str] = block["task_ids"]
+    hits: list[bool] = block["cache_hits"]
+
+    if len(indices) != len(items) or len(hits) != len(items):
+        return None
+
+    out: list[tuple[int, bool, bool]] = []
+
+    if len(tids) == 1:
+        res = results_by_tid.get(tids[0])
+        if not res:
+            return None
+        if len(res) != len(items):
+            print(f"  [metrics] task {tids[0][:8]}…: ожидалось {len(items)} результатов, пришло {len(res)}")
+            return None
+        for row_i, r in zip(indices, res):
+            if r.get("error"):
+                continue
+            out.append((row_i, bool(r.get("is_toxic", False)), bool(r.get("is_spam", False))))
+        return out
+
+    if len(tids) != 2:
+        return None
+
+    if align_cache is None:
+        print(
+            "  [metrics] Пропуск батча: два task_id (частичный кэш), "
+            "нужен REDIS_URL в окружении скрипта для выравнивания."
+        )
+        return None
+
+    hit_pos = [j for j, h in enumerate(hits) if h]
+    miss_pos = [j for j, h in enumerate(hits) if not h]
+    res_cached = results_by_tid.get(tids[0])
+    res_miss = results_by_tid.get(tids[1])
+    if res_cached is None or res_miss is None:
+        return None
+    if len(res_cached) != len(hit_pos) or len(res_miss) != len(miss_pos):
+        print(
+            f"  [metrics] Пропуск батча: ожидалось cached={len(hit_pos)} miss={len(miss_pos)}, "
+            f"получено {len(res_cached)} и {len(res_miss)}"
+        )
+        return None
+
+    for pos, r in zip(hit_pos, res_cached):
+        if r.get("error"):
+            continue
+        out.append((indices[pos], bool(r.get("is_toxic", False)), bool(r.get("is_spam", False))))
+    for pos, r in zip(miss_pos, res_miss):
+        if r.get("error"):
+            continue
+        out.append((indices[pos], bool(r.get("is_toxic", False)), bool(r.get("is_spam", False))))
+    return out
 
 
 def poll_until_done(api_url: str, task_ids: list[str], poll_interval: float, timeout: float) -> dict:
     """Опрашивает GET /tasks/{task_id} пока все не completed/failed или не истек timeout. Возвращает сводку."""
     url_base = f"{api_url.rstrip('/')}/api/v1/tasks"
     started = time.perf_counter()
-    statuses = {tid: None for tid in task_ids}
-    results_count = {tid: 0 for tid in task_ids}
-    completed_at: dict[str, float] = {}
-    errors = {}
+    statuses: dict[str, str | None] = {tid: None for tid in task_ids}
+    results_count: dict[str, int] = {tid: 0 for tid in task_ids}
+    errors: dict[str, str] = {}
+
     while time.perf_counter() - started < timeout:
-        done = True
+        pending = False
         for tid in task_ids:
-            if statuses[tid] in ("completed", "failed"):
+            if statuses[tid] in ("completed", "failed", "error"):
                 continue
             try:
                 r = requests.get(f"{url_base}/{tid}", timeout=10)
@@ -392,69 +286,176 @@ def poll_until_done(api_url: str, task_ids: list[str], poll_interval: float, tim
                     statuses[tid] = "error"
                     continue
                 data = r.json()
-                s = data.get("status", "")
-                statuses[tid] = s
-                if s == "completed":
+                st = data.get("status", "")
+                statuses[tid] = st
+                if st == "completed":
                     results_count[tid] = len(data.get("results") or [])
-                    if tid not in completed_at:
-                        completed_at[tid] = time.perf_counter()
-                elif s == "failed":
+                elif st == "failed":
                     errors[tid] = data.get("error") or "unknown"
-                    if tid not in completed_at:
-                        completed_at[tid] = time.perf_counter()
                 else:
-                    done = False
+                    pending = True
             except Exception as e:
                 errors[tid] = str(e)
-                done = False
-        if done:
+                pending = True
+        if not pending:
             break
         time.sleep(poll_interval)
-    elapsed = time.perf_counter() - started
+
     return {
         "statuses": statuses,
         "results_count": results_count,
-        "completed_at": completed_at,
         "errors": errors,
-        "elapsed": elapsed,
-        "all_done": all(statuses.get(t) in ("completed", "failed", "error") for t in task_ids),
+        "elapsed": time.perf_counter() - started,
     }
 
 
+# ---------------------------------------------------------------------------
+# Postgres-метрики
+# ---------------------------------------------------------------------------
+
+def _pg_available() -> bool:
+    from app.core.config import settings
+    return bool(settings.database_url)
+
+
+def pg_tasks_e2e_seconds(task_ids: list[str]) -> dict[str, float] | None:
+    """task_id -> (completed_at - created_at) в секундах; только строки с обоими timestamp."""
+    if not _pg_available() or not task_ids:
+        return None
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT task_id, created_at, completed_at
+                    FROM tasks
+                    WHERE task_id = ANY(%s) AND created_at IS NOT NULL AND completed_at IS NOT NULL
+                    """,
+                    (task_ids,),
+                )
+                out: dict[str, float] = {}
+                for tid, ca, cpa in cur.fetchall():
+                    dt = (cpa - ca).total_seconds()
+                    if dt >= 0:
+                        out[str(tid)] = float(dt)
+                return out
+    except Exception as e:
+        print(f"  [PG] batch e2e: {e}")
+        return None
+
+
+def pg_cache_stats(task_ids: list[str]) -> tuple[int, int] | None:
+    """(from_cache_count, total_count) по task_items."""
+    if not _pg_available() or not task_ids:
+        return None
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT from_cache, COUNT(*) FROM task_items WHERE task_id = ANY(%s) GROUP BY from_cache",
+                    (task_ids,),
+                )
+                rows = cur.fetchall()
+        n_cache = sum(c for fc, c in rows if fc)
+        n_total = sum(c for _, c in rows)
+        return (n_cache, n_total)
+    except Exception as e:
+        print(f"  [PG] cache stats: {e}")
+        return None
+
+
+def pg_task_statuses(task_ids: list[str]) -> dict[str, str] | None:
+    """task_id -> status из таблицы tasks."""
+    if not _pg_available() or not task_ids:
+        return None
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT task_id, status FROM tasks WHERE task_id = ANY(%s)", (task_ids,))
+                return {str(r[0]): r[1] for r in cur.fetchall()}
+    except Exception as e:
+        print(f"  [PG] task statuses: {e}")
+        return None
+
+
+def pg_quality_check(task_ids: list[str]) -> dict[str, dict[str, Any]] | None:
+    """Проверка валидности полей task_items для completed задач."""
+    if not _pg_available() or not task_ids:
+        return None
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        t.task_id, t.status, COUNT(*) AS n,
+                        SUM(CASE WHEN ti.is_toxic IS NULL THEN 1 ELSE 0 END
+                          + CASE WHEN ti.toxicity_score IS NULL OR ti.toxicity_score < 0 OR ti.toxicity_score > 1 THEN 1 ELSE 0 END
+                          + CASE WHEN ti.tox_model_used IS NULL AND (ti.is_toxic IS TRUE OR COALESCE(ti.toxicity_score,0)<>0) THEN 1 ELSE 0 END
+                        ) AS n_bad_tox,
+                        SUM(CASE WHEN ti.is_spam IS NULL THEN 1 ELSE 0 END
+                          + CASE WHEN ti.spam_score IS NULL OR ti.spam_score < 0 OR ti.spam_score > 1 THEN 1 ELSE 0 END
+                          + CASE WHEN ti.spam_model_used IS NULL AND (ti.is_spam IS TRUE OR COALESCE(ti.spam_score,0)<>0) THEN 1 ELSE 0 END
+                        ) AS n_bad_spam,
+                        SUM(CASE WHEN ti.error IS NOT NULL THEN 1 ELSE 0 END) AS n_err
+                    FROM tasks t JOIN task_items ti ON ti.task_id = t.task_id
+                    WHERE t.task_id = ANY(%s)
+                    GROUP BY t.task_id, t.status
+                    """,
+                    (task_ids,),
+                )
+                return {
+                    str(r[0]): {"status": r[1], "n": int(r[2]), "bad_tox": int(r[3]), "bad_spam": int(r[4]), "err": int(r[5])}
+                    for r in cur.fetchall()
+                }
+    except Exception as e:
+        print(f"  [PG] quality check: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Single-message latency
+# ---------------------------------------------------------------------------
+
 def _normalize_cache_text(text: str) -> str:
-    """Нормализация текста в стиле cache key: strip + lower."""
     return (text or "").strip().lower()
 
 
-def _deduplicate_texts_for_cache(texts: list[str]) -> list[str]:
-    """Дедупликация по нормализованному тексту (как для ключа кэша)."""
+def _deduplicate_texts(texts: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for t in texts:
         key = _normalize_cache_text(t)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(t)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(t)
     return out
 
 
-def _run_single_latency_once(
+def _run_single_latency(
     api_url: str,
     sample: list[str],
     poll_interval: float,
     timeout: float,
     title: str,
-) -> tuple[list[float], int]:
-    """Один прогон замера latency одиночных сообщений по фиксированному набору sample."""
+) -> list[float]:
+    """Замеряет latency для одного сообщения через POST /classify и GET /tasks/{task_id}."""
     classify_url = f"{api_url.rstrip('/')}/api/v1/classify"
-    task_url_base = f"{api_url.rstrip('/')}/api/v1/tasks"
+    task_url = f"{api_url.rstrip('/')}/api/v1/tasks"
     latencies: list[float] = []
     errors = 0
+    poll_sleeps_per_msg: list[int] = []
+    get_count_per_msg: list[int] = []
 
     print(f"\n--- {title} (n={len(sample)}) ---")
     for text in tqdm(sample, desc=title, unit="msg"):
         t0 = time.perf_counter()
+        n_gets = 0
+        n_sleeps = 0
         try:
             r = requests.post(classify_url, json={"text": text}, timeout=10)
             if r.status_code != 200:
@@ -464,18 +465,21 @@ def _run_single_latency_once(
             if not task_id:
                 errors += 1
                 continue
-
             while time.perf_counter() - t0 < timeout:
-                pr = requests.get(f"{task_url_base}/{task_id}", timeout=10)
+                n_gets += 1
+                pr = requests.get(f"{task_url}/{task_id}", timeout=10)
                 if pr.status_code == 200:
-                    status = pr.json().get("status")
-                    if status == "completed":
+                    st = pr.json().get("status")
+                    if st == "completed":
                         latencies.append(time.perf_counter() - t0)
+                        poll_sleeps_per_msg.append(n_sleeps)
+                        get_count_per_msg.append(n_gets)
                         break
-                    if status == "failed":
+                    if st == "failed":
                         errors += 1
                         break
                 time.sleep(poll_interval)
+                n_sleeps += 1
             else:
                 errors += 1
         except Exception:
@@ -483,80 +487,67 @@ def _run_single_latency_once(
 
     if not latencies:
         print(f"  Нет успешных замеров. Ошибок: {errors}")
-        return latencies, errors
+        return latencies
 
     pcts = percentiles(latencies)
     avg = sum(latencies) / len(latencies)
+    total_sleep = sum(poll_sleeps_per_msg) * poll_interval
+    avg_sleeps = sum(poll_sleeps_per_msg) / len(poll_sleeps_per_msg)
+    avg_gets = sum(get_count_per_msg) / len(get_count_per_msg)
     print(f"  Успешно: {len(latencies)}/{len(sample)}, ошибок: {errors}")
-    print(f"  Avg:  {avg * 1000:.0f}ms")
-    print(f"  p50:  {pcts['p50'] * 1000:.0f}ms")
-    print(f"  p95:  {pcts['p95'] * 1000:.0f}ms")
-    print(f"  p99:  {pcts['p99'] * 1000:.0f}ms")
-    print(f"  Min:  {min(latencies) * 1000:.0f}ms, Max: {max(latencies) * 1000:.0f}ms")
-    return latencies, errors
+    print(f"  Avg: {avg * 1000:.0f}ms  {_fmt_pcts(pcts)}")
+    print(f"  Min: {min(latencies) * 1000:.0f}ms, Max: {max(latencies) * 1000:.0f}ms")
+    print(
+        f"  Опрос: poll_interval={poll_interval * 1000:.0f}ms; "
+        f"на успешное сообщение в среднем {avg_sleeps:.2f} пауз(ы) опроса "
+        f"(~{avg_sleeps * poll_interval * 1000:.0f}ms sleep суммарно), "
+        f"{avg_gets:.2f} GET /tasks; за весь прогон sleep опроса ~{total_sleep * 1000:.0f}ms"
+    )
+    return latencies
 
 
-def run_single_latency_test(
-    api_url: str,
-    texts: list[str],
-    n_messages: int,
-    poll_interval: float = 0.05,
-    timeout: float = 30.0,
-    mode: str = "cold-hot",
-    dedup: bool = True,
-) -> None:
-    """
-    Последовательно отправляет одиночные сообщения через POST /classify,
-    опрашивает GET /tasks/{task_id} до завершения и замеряет end-to-end latency.
-    mode:
-      - "single": один прогон по случайной выборке
-      - "cold-hot": два прогона по одному и тому же набору:
-            1) очистка кэша -> cold-cache
-            2) без очистки -> hot-cache
-    """
-    source_texts = _deduplicate_texts_for_cache(texts) if dedup else list(texts)
-    if len(source_texts) < len(texts) and dedup:
-        print(f"\n[Single latency] Дедупликация по cache-нормализации: {len(texts)} -> {len(source_texts)}")
-    sample = random.sample(source_texts, min(n_messages, len(source_texts)))
+def run_single_latency_test(api_url: str, texts: list[str], n: int, poll_interval: float, timeout: float, mode: str, dedup: bool) -> None:
+    source = _deduplicate_texts(texts) if dedup else list(texts)
+    if dedup and len(source) < len(texts):
+        print(f"\n[Single latency] Дедупликация: {len(texts)} → {len(source)}")
+    sample = random.sample(source, min(n, len(source)))
 
     if mode == "single":
-        _run_single_latency_once(
-            api_url=api_url,
-            sample=sample,
-            poll_interval=poll_interval,
-            timeout=timeout,
-            title="Тест latency одиночных сообщений",
-        )
+        _run_single_latency(api_url, sample, poll_interval, timeout, "Single latency")
         return
 
-    if mode != "cold-hot":
-        raise ValueError(f"Unsupported single latency mode: {mode}")
-
     from scripts.run.clear_redis import clear_rs
-
     clear_rs()
-    print("[Single latency] Кэш Redis очищен перед cold-cache прогоном.")
+    print("[Single latency] Кэш очищен.")
 
-    cold_latencies, _ = _run_single_latency_once(
-        api_url=api_url,
-        sample=sample,
-        poll_interval=poll_interval,
-        timeout=timeout,
-        title="Cold-cache single latency",
-    )
-    hot_latencies, _ = _run_single_latency_once(
-        api_url=api_url,
-        sample=sample,
-        poll_interval=poll_interval,
-        timeout=timeout,
-        title="Hot-cache single latency",
-    )
-
-    if cold_latencies and hot_latencies:
-        cold_avg = sum(cold_latencies) / len(cold_latencies)
-        hot_avg = sum(hot_latencies) / len(hot_latencies)
+    cold = _run_single_latency(api_url, sample, poll_interval, timeout, "Cold-cache")
+    hot = _run_single_latency(api_url, sample, poll_interval, timeout, "Hot-cache")
+    if cold and hot:
+        cold_avg = sum(cold) / len(cold)
+        hot_avg = sum(hot) / len(hot)
         if hot_avg > 0:
-            print(f"  Ускорение hot vs cold (Avg): x{cold_avg / hot_avg:.2f}")
+            print(f"  Ускорение hot vs cold: x{cold_avg / hot_avg:.2f}")
+
+
+# ---------------------------------------------------------------------------
+# Главный прогон
+# ---------------------------------------------------------------------------
+
+def count_batches(events: list[tuple[float, int, bool]], batch_size: int, window: float) -> int:
+    n = 0
+    cur_len = 0
+    first_t = None
+    for t, _, _ in events:
+        cur_len += 1
+        if first_t is None:
+            first_t = t
+        if cur_len >= batch_size or (t - first_t) >= window:
+            n += 1
+            cur_len = 0
+            first_t = None
+    if cur_len > 0:
+        n += 1
+    return n
 
 
 def run(
@@ -575,305 +566,297 @@ def run(
     single_latency_n: int = 0,
     single_latency_mode: str = "cold-hot",
     single_latency_dedup: bool = True,
+    label_col: str | None = "label",
+    spam_label_col: str | None = None,
 ) -> None:
     if clear_cache:
         from scripts.run.clear_redis import clear_rs
         clear_rs()
 
-    texts = load_texts(val_data, max_samples)
+    texts, tox_labels, spam_labels = load_validation_rows(
+        val_data, max_samples, label_col=label_col, spam_label_col=spam_label_col
+    )
     n = len(texts)
     print(f"Загружено текстов: {n} (файл: {val_data})")
     if n == 0:
-        print("Нет данных для отправки.")
         return
 
-    # Индексы для повторной отправки (проверка кэша)
-    n_dup = max(0, int(n * duplicate_ratio))
-    duplicate_indices = random.sample(range(n), min(n_dup, n)) if n_dup else []
-    duplicate_after_sec = max(0.0, duplicate_after_sec)
+    align_cache = _moderation_cache_for_alignment()
+    if align_cache is None:
+        print("  [metrics] REDIS_URL не задан или недоступен — при частичном кэше батч не попадёт в P/R/F1.")
 
-    # События: (время, индекс_текста, это_дубликат). Дубликаты ставим позже по времени,
-    # чтобы они ушли в следующих батчах после первой волны — тогда кэш уже заполнен воркером.
-    events = []
+    n_dup = max(0, int(n * duplicate_ratio))
+    dup_indices = random.sample(range(n), min(n_dup, n)) if n_dup else []
+
+    events: list[tuple[float, int, bool]] = []
     t = 0.0
     for i in range(n):
         events.append((t, i, False))
         t += random.randint(delay_min_ms, delay_max_ms) / 1000.0
-    t_dup = t + duplicate_after_sec
-    for idx in duplicate_indices:
+    t_dup = t + max(0.0, duplicate_after_sec)
+    for idx in dup_indices:
         events.append((t_dup, idx, True))
         t_dup += random.randint(delay_min_ms, delay_max_ms) / 1000.0
     events.sort(key=lambda x: x[0])
 
     n_batches = count_batches(events, batch_size, batch_window_sec)
-    batch = []
-    batch_first_time = None
-    all_task_ids = []
-    batch_times = []
-    duplicate_task_ids = []
-    submitted_batches: list[dict[str, Any]] = []  # expected_items + returned task_ids
-
-    print(f"Параметры: batch_size={batch_size}, batch_window={batch_window_sec}s, delay={delay_min_ms}-{delay_max_ms}ms")
-    print(f"Дубликаты: {len(duplicate_indices)} сообщений через {duplicate_after_sec}s (проверка кэша)")
+    print(f"batch_size={batch_size}, window={batch_window_sec}s, delay={delay_min_ms}-{delay_max_ms}ms")
+    print(f"Дубликаты: {len(dup_indices)} через {duplicate_after_sec}s")
     print(f"Ожидаемое число батчей: {n_batches}")
+
+    # --- Отправка ---
+    all_task_ids: list[str] = []
+    submitted: list[dict[str, Any]] = []
+    batch_send_times: list[float] = []
+    batch_send_hot: list[bool] = []
+    batch: list[tuple[str, int, bool]] = []
+    batch_first: float | None = None
+
+    def _flush_batch():
+        nonlocal batch, batch_first
+        if not batch:
+            return
+        has_dup = any(d for _, _, d in batch)
+        items_text = [t for t, _, _ in batch]
+        indices = [i for _, i, _ in batch]
+        items_pairs = [(t, i) for t, i, _ in batch]
+        cache_hits = (
+            [align_cache.get_cached_result(t) is not None for t in items_text]
+            if align_cache
+            else [False] * len(items_text)
+        )
+        t0 = time.perf_counter()
+        tids, status = send_batch(api_url, items_pairs)
+        dt = time.perf_counter() - t0
+        batch_send_times.append(dt)
+        batch_send_hot.append(has_dup)
+        if tids:
+            submitted.append(
+                {
+                    "n_items": len(items_pairs),
+                    "task_ids": list(tids),
+                    "indices": indices,
+                    "items": items_text,
+                    "cache_hits": cache_hits,
+                    "has_dup": has_dup,
+                }
+            )
+            all_task_ids.extend(tids)
+        else:
+            print(f"  [batch] HTTP {status}, items={len(items_text)}")
+        pbar.update(1)
+        batch = []
+        batch_first = None
 
     start_wall = time.perf_counter()
     pbar = tqdm(total=n_batches, desc="Батчи", unit="batch")
-    for event_time, idx, is_dup in events:
-        # Реальная задержка: ждём до момента, когда должно «прийти» это сообщение (5–50 ms между сообщениями)
+    for ev_time, idx, _is_dup in events:
         elapsed = time.perf_counter() - start_wall
-        if event_time > elapsed:
-            time.sleep(event_time - elapsed)
-        text = texts[idx]
-        batch.append((text, is_dup))
-        if batch_first_time is None:
-            batch_first_time = event_time
-        now = event_time
-        flush = (
-            len(batch) >= batch_size
-            or (now - batch_first_time) >= batch_window_sec
-        )
-        if not flush:
-            continue
-
-        items = [t for t, _ in batch]
-        has_dup = any(d for _, d in batch)
-        t0 = time.perf_counter()
-        task_ids, status = send_batch(api_url, items, "[batch]")
-        t1 = time.perf_counter()
-        batch_times.append((len(items), t1 - t0, has_dup))
-        if task_ids:
-            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup, "sent_at": t0})
-            all_task_ids.extend(task_ids)
-            if has_dup:
-                duplicate_task_ids.extend(task_ids)
-        else:
-            print(f"  [batch] HTTP {status}, items={len(items)}")
-        pbar.update(1)
-        batch = []
-        batch_first_time = None
-
-    if batch:
-        items = [t for t, _ in batch]
-        has_dup = any(d for _, d in batch)
-        t0 = time.perf_counter()
-        task_ids, status = send_batch(api_url, items, "[batch]")
-        t1 = time.perf_counter()
-        batch_times.append((len(items), t1 - t0, has_dup))
-        if task_ids:
-            submitted_batches.append({"n_items": len(items), "task_ids": list(task_ids), "has_dup": has_dup, "sent_at": t0})
-            all_task_ids.extend(task_ids)
-            if has_dup:
-                duplicate_task_ids.extend(task_ids)
-        pbar.update(1)
+        if ev_time > elapsed:
+            time.sleep(ev_time - elapsed)
+        batch.append((texts[idx], idx, _is_dup))
+        if batch_first is None:
+            batch_first = ev_time
+        if len(batch) >= batch_size or (ev_time - batch_first) >= batch_window_sec:
+            _flush_batch()
+    _flush_batch()
     pbar.close()
 
     if not all_task_ids:
         print("Нет task_id для опроса.")
         return
 
-    print(f"Отправлено батчей: {len(batch_times)}, всего task_id: {len(all_task_ids)}")
-    print("Ожидание завершения (polling)...")
-    summary = poll_until_done(api_url, all_task_ids, poll_interval, timeout)
+    unique_ids = list(dict.fromkeys(all_task_ids))
 
-    # Сводка
-    completed = sum(1 for tid in all_task_ids if summary["statuses"].get(tid) == "completed")
-    failed = sum(1 for tid in all_task_ids if summary["statuses"].get(tid) == "failed")
-    total_results = sum(summary["results_count"].get(tid, 0) for tid in all_task_ids)
-    print()
-    print("--- Результаты ---")
-    print(f"  Завершено успешно: {completed}/{len(all_task_ids)}")
-    print(f"  С ошибкой:         {failed}")
+    # --- Polling ---
+    print(f"\nОтправлено батчей: {len(batch_send_times)}, task_id: {len(unique_ids)}")
+    print("Polling...")
+    summary = poll_until_done(api_url, unique_ids, poll_interval, timeout)
+
+    completed = sum(1 for tid in unique_ids if summary["statuses"].get(tid) == "completed")
+    failed = sum(1 for tid in unique_ids if summary["statuses"].get(tid) == "failed")
+    total_results = sum(summary["results_count"].get(tid, 0) for tid in unique_ids)
+
+    # --- Результаты ---
+    print(f"\n--- Результаты ---")
+    print(f"  Завершено: {completed}/{len(unique_ids)}, ошибок: {failed}")
     print(f"  Всего результатов: {total_results}")
-    print(f"  Время опроса:      {summary['elapsed']:.2f}s")
+    print(f"  Время polling: {summary['elapsed']:.2f}s")
     if summary["errors"]:
         for tid, err in list(summary["errors"].items())[:5]:
-            print(f"  Ошибка {tid[:8]}...: {err}")
-    if batch_times:
-        send_times = [t for _, t, _ in batch_times]
-        avg_send = sum(send_times) / len(send_times)
-        send_pcts = percentiles(send_times)
-        print(f"  Среднее время отправки батча: {avg_send*1000:.0f}ms")
-        if send_pcts:
-            print(f"  Отправка батча: p50={send_pcts['p50']*1000:.0f}ms, p95={send_pcts['p95']*1000:.0f}ms, p99={send_pcts['p99']*1000:.0f}ms")
+            print(f"  Ошибка {tid[:8]}…: {err}")
 
-    # Batch end-to-end latency (от POST до completion в polling)
-    completed_at = summary.get("completed_at", {})
-    batch_e2e_latencies: list[float] = []
-    for b in submitted_batches:
-        sent_at = b.get("sent_at")
-        if sent_at is None:
-            continue
-        tids = b["task_ids"]
-        completions = [completed_at[tid] for tid in tids if tid in completed_at]
-        if completions:
-            batch_e2e_latencies.append(max(completions) - sent_at)
-    if batch_e2e_latencies:
-        e2e_pcts = percentiles(batch_e2e_latencies)
-        avg_e2e = sum(batch_e2e_latencies) / len(batch_e2e_latencies)
-        print(f"  Batch e2e latency (POST → completed):")
-        print(f"    Avg:  {avg_e2e*1000:.0f}ms")
-        print(f"    p50:  {e2e_pcts['p50']*1000:.0f}ms, p95: {e2e_pcts['p95']*1000:.0f}ms, p99: {e2e_pcts['p99']*1000:.0f}ms")
-        print(f"    Min:  {min(batch_e2e_latencies)*1000:.0f}ms, Max: {max(batch_e2e_latencies)*1000:.0f}ms")
+    if batch_send_times:
+        avg_send = sum(batch_send_times) / len(batch_send_times)
+        pcts = percentiles(batch_send_times)
+        print(f"  Отправка батча (все): avg={avg_send * 1000:.0f}ms  {_fmt_pcts(pcts)}")
+        cold_st = [t for t, hot in zip(batch_send_times, batch_send_hot) if not hot]
+        hot_st = [t for t, hot in zip(batch_send_times, batch_send_hot) if hot]
+        if hot_st:
+            print("  Отправка батча cold vs hot:")
+            _print_latency_bucket("    Cold (первая волна, без дубликатов в батче)", cold_st)
+            _print_latency_bucket("    Hot (батч с повтором текста)", hot_st)
+            if cold_st:
+                ca, ha = sum(cold_st) / len(cold_st), sum(hot_st) / len(hot_st)
+                if ha > 0:
+                    print(f"    Отношение avg cold / avg hot: {ca / ha:.2f}x")
 
-    # Throughput
-    if submitted_batches and completed_at:
-        first_send = min(b["sent_at"] for b in submitted_batches if b.get("sent_at") is not None)
-        last_completion = max(completed_at.values())
-        wall_time = last_completion - first_send
-        if wall_time > 0:
-            throughput = total_results / wall_time
-            print(f"  Throughput: {throughput:.0f} msg/sec (wall time: {wall_time:.1f}s, total results: {total_results})")
+    # --- Классификация: P/R/F1 (нужна колонка меток в файле) ---
+    if any(t is not None for t in tox_labels) or any(s is not None for s in spam_labels):
+        results_by_tid: dict[str, list[dict[str, Any]]] = {}
+        for tid in unique_ids:
+            if summary["statuses"].get(tid) != "completed":
+                continue
+            _st, res = fetch_task_results(api_url, tid)
+            if res is not None:
+                results_by_tid[tid] = res
 
-    # Процент сообщений, выданных из кэша (по Postgres task_items.from_cache)
-    stats = get_cache_stats_from_postgres(all_task_ids)
-    if stats is not None:
-        n_cache, n_total = stats
+        merged_rows: list[tuple[int, bool, bool]] = []
+        for block in submitted:
+            part = merge_batch_predictions(block, results_by_tid, align_cache)
+            if part:
+                merged_rows.extend(part)
+
+        print("\n--- Качество (батч, vs разметка) ---")
+        if not merged_rows:
+            print("  Не удалось сопоставить предсказания с батчами (проверьте completed и Redis при 2 task_id).")
+        else:
+            if any(t is not None for t in tox_labels):
+                yt_list: list[bool] = []
+                yp_list: list[bool] = []
+                for row_i, pt, _ in merged_rows:
+                    gt = tox_labels[row_i]
+                    if gt is None:
+                        continue
+                    yt_list.append(gt)
+                    yp_list.append(pt)
+                if yt_list:
+                    _print_binary_metrics("Токсичность (is_toxic)", yt_list, yp_list)
+                else:
+                    print("  Токсичность: нет строк с меткой в выборке предсказаний.")
+            if any(s is not None for s in spam_labels):
+                ys_t: list[bool] = []
+                ps_t: list[bool] = []
+                for row_i, _, ps in merged_rows:
+                    gs = spam_labels[row_i]
+                    if gs is None:
+                        continue
+                    ys_t.append(gs)
+                    ps_t.append(ps)
+                if ys_t:
+                    _print_binary_metrics("Спам (is_spam)", ys_t, ps_t)
+                else:
+                    print("  Спам: нет строк с меткой spam в выборке предсказаний.")
+
+    # --- Postgres-метрики ---
+    e2e_map = pg_tasks_e2e_seconds(unique_ids)
+    if e2e_map is None:
+        print("  Batch e2e (Postgres): пропуск (нет DATABASE_URL или ошибка запроса)")
+    elif not e2e_map:
+        print("  Batch e2e (Postgres): нет строк tasks с created_at+completed_at по этим task_id")
+    else:
+        all_e2e = list(e2e_map.values())
+        avg_all = sum(all_e2e) / len(all_e2e)
+        p_all = percentiles(all_e2e)
+        print(f"  Batch e2e (Postgres, все task_id): avg={avg_all * 1000:.0f}ms  {_fmt_pcts(p_all)}")
+        print(f"    min={min(all_e2e) * 1000:.0f}ms, max={max(all_e2e) * 1000:.0f}ms")
+
+        tid_hot: dict[str, bool] = {}
+        for b in submitted:
+            for tid in b["task_ids"]:
+                tid_hot[str(tid)] = b["has_dup"]
+
+        cold_e2e = [e2e_map[tid] for tid in unique_ids if tid in e2e_map and not tid_hot.get(tid, False)]
+        hot_e2e = [e2e_map[tid] for tid in unique_ids if tid in e2e_map and tid_hot.get(tid, False)]
+
+        print("  Batch e2e cold vs hot (Postgres; hot = task из батча с дубликатами):")
+        _print_latency_bucket("    Cold", cold_e2e)
+        _print_latency_bucket("    Hot", hot_e2e)
+        if cold_e2e and hot_e2e:
+            ca, ha = sum(cold_e2e) / len(cold_e2e), sum(hot_e2e) / len(hot_e2e)
+            if ha > 0:
+                print(f"    Отношение avg cold / avg hot: {ca / ha:.2f}x (>1 — cold дольше)")
+        elif not dup_indices:
+            print("    (Дубликаты не заданы — только cold.)")
+
+    cache = pg_cache_stats(unique_ids)
+    if cache:
+        n_cache, n_total = cache
         pct = 100.0 * n_cache / n_total if n_total else 0.0
-        print(f"  Процент сообщений из кэша:   {pct:.1f}% ({n_cache}/{n_total})")
-    else:
-        print("  Процент из кэша: недоступен (нет DATABASE_URL или запись в task_items)")
+        print(f"  Из кэша: {pct:.1f}% ({n_cache}/{n_total})")
 
-    # -----------------------------
-    # Проверка корректности цепочки (DB + cache)
-    # -----------------------------
-    unique_task_ids = list(dict.fromkeys(all_task_ids))
-    submitted_items_total = sum(b["n_items"] for b in submitted_batches)
-    print()
-    print("--- Проверка корректности ---")
+    # Throughput (по polling wall time)
+    if total_results > 0 and summary["elapsed"] > 0:
+        wall = time.perf_counter() - start_wall
+        print(f"  Throughput: {total_results / wall:.0f} msg/sec (wall {wall:.1f}s)")
 
-    t_db0 = time.perf_counter()
-    db_stats = get_postgres_task_items_quality_stats(unique_task_ids)
-    t_db1 = time.perf_counter()
-    if not db_stats:
-        print("  [DB] Пропуск проверки (нет DATABASE_URL или ошибка/нет данных).")
-    else:
-        # 1) Проверка: API results_count == task_items количество для completed задач
-        db_mismatches = []
-        for tid in unique_task_ids:
-            st = summary["statuses"].get(tid)
-            if st != "completed":
-                continue
-            db_n = db_stats.get(tid, {}).get("n_items", 0)
-            api_n = summary["results_count"].get(tid, 0)
-            if int(db_n) != int(api_n):
-                db_mismatches.append((tid, api_n, db_n))
-        if db_mismatches:
-            print(f"  [DB] Несоответствие результатов API vs task_items: {len(db_mismatches)} task_id")
-            for tid, api_n, db_n in db_mismatches[:5]:
-                print(f"    - {tid[:8]}... api_results={api_n} db_items={db_n}")
+    # --- Проверка корректности (Postgres) ---
+    db_statuses = pg_task_statuses(unique_ids)
+    if db_statuses is not None:
+        missing = [tid for tid in unique_ids if tid not in db_statuses]
+        not_completed = {tid: st for tid, st in db_statuses.items() if st != "completed"}
+        if missing:
+            print(f"\n  [PG] Нет строки tasks для {len(missing)} task_id (DATABASE_URL может не совпадать с API/воркером)")
+        if not_completed:
+            by_st = Counter(not_completed.values())
+            print(f"  [PG] Не completed: {dict(by_st)}")
+            for tid, st in list(not_completed.items())[:5]:
+                print(f"    - {tid[:8]}… status={st}")
+
+    quality = pg_quality_check(unique_ids)
+    if quality:
+        bad = [(tid, q) for tid, q in quality.items() if q["status"] == "completed" and (q["bad_tox"] or q["bad_spam"] or q["err"])]
+        if bad:
+            print(f"  [PG] Невалидные результаты: {len(bad)} task_id")
+            for tid, q in bad[:5]:
+                print(f"    - {tid[:8]}… bad_tox={q['bad_tox']} bad_spam={q['bad_spam']} err={q['err']}")
         else:
-            print("  [DB] Соответствие: API results_count == task_items count (для completed).")
+            print("  [PG] Качество результатов: OK")
 
-        # 2) Проверка: для каждого submitted батча сумма task_items по его task_ids == expected n_items
-        batch_mismatches = []
-        total_db_items = 0
-        for b in submitted_batches:
-            task_ids = b["task_ids"]
-            expected = int(b["n_items"])
-            n_db = sum(int(db_stats.get(tid, {}).get("n_items", 0)) for tid in task_ids)
-            total_db_items += n_db
-            if n_db != expected:
-                batch_mismatches.append({"task_ids": task_ids, "expected": expected, "db_items": n_db})
-        if batch_mismatches:
-            print(f"  [DB] Ошибка количества items по батчам: {len(batch_mismatches)} батч(ей)")
-            for m in batch_mismatches[:3]:
-                print(f"    - expected={m['expected']} db_items={m['db_items']} task_ids={[t[:8]+'...' for t in m['task_ids']]}")
-        else:
-            print(f"  [DB] Items присутствуют: total_db_items={total_db_items}, submitted_items={submitted_items_total}")
+        items_total = sum(q["n"] for q in quality.values())
+        submitted_total = sum(b["n_items"] for b in submitted)
+        if items_total != submitted_total:
+            print(f"  [PG] items в БД ({items_total}) ≠ отправлено ({submitted_total})")
 
-        # 3) Проверка “адекватности” полей для completed задач
-        bad_tasks = []
-        for tid, stinfo in db_stats.items():
-            if stinfo.get("status") != "completed":
-                continue
-            if int(stinfo.get("n_invalid_toxic", 0)) > 0 or int(stinfo.get("n_invalid_spam", 0)) > 0 or int(stinfo.get("n_error_items", 0)) > 0:
-                bad_tasks.append((tid, stinfo))
-        if bad_tasks:
-            print(f"  [DB] Найдены невалидные/ошибочные результаты: {len(bad_tasks)} task_id")
-            for tid, stinfo in bad_tasks[:5]:
-                print(f"    - {tid[:8]}... invalid_toxic={stinfo['n_invalid_toxic']} invalid_spam={stinfo['n_invalid_spam']} error_items={stinfo['n_error_items']}")
-        else:
-            print("  [DB] Качество результатов: OK (completed tasks).")
-
-    # 4) Проверка Redis кэша (опционально — если доступен)
-    t_redis0 = time.perf_counter()
-    cache_check = _validate_redis_cache_for_task_items(unique_task_ids)
-    t_redis1 = time.perf_counter()
-    if not cache_check:
-        print("  [Redis] Пропуск проверки кэша.")
-    else:
-        if not cache_check.get("enabled"):
-            print(f"  [Redis] Пропуск проверки кэша: {cache_check.get('reason')}")
-        else:
-            checked = cache_check.get("checked_keys", 0)
-            found = cache_check.get("found_keys", 0)
-            missing = cache_check.get("missing_keys", 0)
-            print(f"  [Redis] Кэш ключи: checked={checked}, found={found}, missing={missing}")
-            if missing > 0:
-                print("  [Redis] Внимание: часть ключей кэша отсутствует — это повод углубиться.")
-                missing_by_tox_cat = cache_check.get("missing_by_tox_cat") or {}
-                missing_by_spam_cat = cache_check.get("missing_by_spam_cat") or {}
-                if missing_by_tox_cat:
-                    print(f"  [Redis] Missing by tox models: {missing_by_tox_cat}")
-                if missing_by_spam_cat:
-                    print(f"  [Redis] Missing by spam models: {missing_by_spam_cat}")
-                examples = cache_check.get("missing_examples") or []
-                if examples:
-                    print("  [Redis] Missing examples (tail):")
-                    for ex in examples:
-                        print(
-                            f"    - {ex.get('key_tail')} tox_cat={ex.get('tox_cat')} spam_cat={ex.get('spam_cat')} "
-                            f"tox_models={ex.get('tox_models')} spam_models={ex.get('spam_models')}"
-                        )
-            if cache_check.get("sample_errors"):
-                print(f"  [Redis] Ошибки в sample payload: {cache_check['sample_errors']}")
-
-    print(f"  [Timing] DB validation: {(t_db1 - t_db0):.2f}s, Redis validation: {(t_redis1 - t_redis0):.2f}s")
-
-    # Single-message latency test
+    # --- Single latency ---
     if single_latency_n > 0:
-        run_single_latency_test(
-            api_url=api_url,
-            texts=texts,
-            n_messages=single_latency_n,
-            poll_interval=poll_interval,
-            timeout=timeout,
-            mode=single_latency_mode,
-            dedup=single_latency_dedup,
-        )
+        run_single_latency_test(api_url, texts, single_latency_n, poll_interval, timeout, single_latency_mode, single_latency_dedup)
 
-    print("Готово.")
+    print("\nГотово.")
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(
-        description="Валидация цепочки API → очередь → бэкенд → Postgres/кэш по данным из parquet/csv",
-    )
-    p.add_argument("--val-data", type=Path, required=True, help="Путь к val.parquet или val.csv (колонка text)")
-    p.add_argument("-n", "--max-samples", type=int, default=None, help="Макс. число строк файла для использования (по умолчанию все)")
+    p = argparse.ArgumentParser(description="Валидация цепочки API → очередь → воркер → Postgres/кэш")
+    p.add_argument("--val-data", type=Path, required=True, help="Путь к parquet/csv (колонка text)")
+    p.add_argument("-n", "--max-samples", type=int, default=None, help="Макс. строк")
     p.add_argument("--api-url", type=str, default="http://localhost:8000", help="Базовый URL API")
-    p.add_argument("--batch-size", type=int, default=50, help="Отправлять батч при достижении N сообщений")
-    p.add_argument("--batch-window", type=float, default=3.0, help="Отправлять батч при N секундах с первого сообщения в батче")
-    p.add_argument("--delay-min-ms", type=int, default=5, help="Мин. задержка между добавлением сообщений в батч (ms)")
-    p.add_argument("--delay-max-ms", type=int, default=50, help="Макс. задержка (ms)")
-    p.add_argument("--duplicate-ratio", type=float, default=0.2, help="Доля сообщений для повторной отправки (проверка кэша)")
-    p.add_argument("--duplicate-after-sec", type=float, default=10.0, help="Через сколько секунд начинать повторную отправку")
-    p.add_argument("--poll-interval", type=float, default=0.2, help="Интервал опроса GET /tasks (сек)")
-    p.add_argument("--timeout", type=float, default=120.0, help="Таймаут ожидания завершения всех задач (сек)")
-    p.add_argument("--clear-cache", action="store_true", help="Перед прогоном очистить Redis-кэш модерации")
-    p.add_argument("--single-latency-n", type=int, default=0, help="После батч-теста: замерить e2e latency для N одиночных сообщений (POST /classify)")
+    p.add_argument("--batch-size", type=int, default=50, help="Размер батча")
+    p.add_argument("--batch-window", type=float, default=3.0, help="Окно батча (сек)")
+    p.add_argument("--delay-min-ms", type=int, default=5, help="Мин. задержка между сообщениями (мс)")
+    p.add_argument("--delay-max-ms", type=int, default=50, help="Макс. задержка (мс)")
+    p.add_argument("--duplicate-ratio", type=float, default=0.2, help="Доля дубликатов")
+    p.add_argument("--duplicate-after-sec", type=float, default=10.0, help="Задержка перед дубликатами (сек)")
+    p.add_argument("--poll-interval", type=float, default=0.2, help="Интервал polling (сек)")
+    p.add_argument("--timeout", type=float, default=120.0, help="Таймаут polling (сек)")
+    p.add_argument("--clear-cache", action="store_true", help="Очистить Redis-кэш перед прогоном")
+    p.add_argument("--single-latency-n", type=int, default=0, help="Замер single-message latency (кол-во)")
+    p.add_argument("--single-latency-mode", type=str, default="cold-hot", choices=["single", "cold-hot"])
+    p.add_argument("--single-latency-no-dedup", action="store_true", help="Не дедуплицировать тексты для single latency")
     p.add_argument(
-        "--single-latency-mode",
+        "--label-col",
         type=str,
-        default="cold-hot",
-        choices=["single", "cold-hot"],
-        help="Режим single latency: single (один прогон) или cold-hot (cold+hot на одном наборе).",
+        default="label",
+        help="Имя колонки метки токсичности (1/true — токсично). Пусто — не считать P/R/F1",
     )
     p.add_argument(
-        "--single-latency-no-dedup",
-        action="store_true",
-        help="Отключить дедупликацию single-тестовых текстов (по умолчанию dedup включен).",
+        "--spam-label-col",
+        type=str,
+        default=None,
+        help="Опционально: колонка метки спама для P/R/F1 по is_spam",
     )
     args = p.parse_args()
 
@@ -893,6 +876,8 @@ def main():
         single_latency_n=args.single_latency_n,
         single_latency_mode=args.single_latency_mode,
         single_latency_dedup=not args.single_latency_no_dedup,
+        label_col=(args.label_col.strip() or None),
+        spam_label_col=(args.spam_label_col.strip() if args.spam_label_col else None),
     )
 
 
