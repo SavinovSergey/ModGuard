@@ -1,14 +1,17 @@
-"""Фикс меток спама по правилам CAPS_WORD и разбиение на train/val/test 60/20/20.
+"""Подготовка данных для задачи spam.
 
-Для записей, в которых текст удовлетворяет хотя бы одному из правил CAPS_WORD
-(слово капсом + !! или слово 7+ букв капсом), выставляется метка 1 (спам).
-Затем данные стратифицированно разбиваются на train 60%, val 20%, test 20%.
+Скрипт умеет:
+1) загрузить данные из parquet или HuggingFace datasets;
+2) адаптировать их к формату text/label;
+3) поправить метки по правилам CAPS_WORD;
+4) сделать стратифицированный split train/val/test = 60/20/20.
 """
 import argparse
 import sys
 from pathlib import Path
 
 import pandas as pd
+from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -42,20 +45,98 @@ def fix_labels(df: pd.DataFrame, text_col: str = "text", label_col: str = "label
     return df
 
 
+def _normalize_label(value) -> int:
+    """Приводит различные форматы меток к 0/1 (1 = spam)."""
+    if pd.isna(value):
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value != 0)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        spam_aliases = {"spam", "junk", "toxic", "1", "true", "yes", "y"}
+        ham_aliases = {"ham", "not_spam", "0", "false", "no", "n"}
+        if normalized in spam_aliases:
+            return 1
+        if normalized in ham_aliases:
+            return 0
+    return int(bool(value))
+
+
+def adapt_dataframe(df: pd.DataFrame, text_col: str, label_col: str) -> pd.DataFrame:
+    """Адаптирует таблицу к единому формату: text(str) + label(0/1)."""
+    if text_col not in df.columns or label_col not in df.columns:
+        raise ValueError(
+            f"Ожидаются колонки '{text_col}' и '{label_col}'. "
+            f"Найдены: {list(df.columns)}"
+        )
+
+    prepared = df[[text_col, label_col]].copy()
+    prepared = prepared.rename(columns={text_col: "text", label_col: "label"})
+    prepared["text"] = prepared["text"].astype(str).str.strip().str.lower()
+    prepared = prepared[prepared["text"] != ""]
+    prepared = prepared.drop_duplicates(subset=["text"])
+    prepared["label"] = prepared["label"].apply(_normalize_label).astype(int)
+    return prepared
+
+
+def load_source_dataframe(args: argparse.Namespace) -> pd.DataFrame:
+    """Загружает данные либо из parquet, либо из HuggingFace datasets."""
+    if args.input:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Файл не найден: {input_path}")
+        print(f"Загрузка данных из parquet: {input_path}...")
+        return pd.read_parquet(input_path)
+
+    print(f"Загрузка HuggingFace датасета: {args.hf_dataset}...")
+    ds = load_dataset(args.hf_dataset, name=args.hf_config)
+    split_name = args.hf_split
+    if split_name == "all":
+        frames = []
+        for split in ds.keys():
+            frames.append(ds[split].to_pandas())
+        if not frames:
+            raise ValueError(f"В датасете {args.hf_dataset} нет доступных split-ов")
+        return pd.concat(frames, ignore_index=True)
+
+    if split_name not in ds:
+        raise ValueError(f"Split '{split_name}' не найден. Доступно: {list(ds.keys())}")
+    return ds[split_name].to_pandas()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Фикс меток по CAPS_WORD и разбиение train/val/test 60/20/20"
+        description="Подготовка данных для spam: загрузка, адаптация, фикс меток и split 60/20/20"
     )
-    parser.add_argument(
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
         "--input",
         type=str,
-        required=True,
-        help="Входной parquet с колонками text, label",
+        help="Входной parquet файл",
+    )
+    source_group.add_argument(
+        "--hf-dataset",
+        type=str,
+        help="Имя датасета на HuggingFace, например: community-datasets/sms-spam",
+    )
+    parser.add_argument(
+        "--hf-config",
+        type=str,
+        default=None,
+        help="Опциональный config/subset HuggingFace датасета",
+    )
+    parser.add_argument(
+        "--hf-split",
+        type=str,
+        default="train",
+        help="Какой split брать из HF (train/test/validation/all)",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="spam_data",
+        default="data/spam",
         help="Директория для train.parquet, val.parquet, test.parquet",
     )
     parser.add_argument(
@@ -78,21 +159,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    input_path = Path(args.input)
-    if not input_path.exists():
-        raise FileNotFoundError(f"Файл не найден: {input_path}")
+    df = load_source_dataframe(args)
+    df = adapt_dataframe(df, text_col=args.text_col, label_col=args.label_col)
 
-    print(f"Загрузка данных из {input_path}...")
-    df = pd.read_parquet(input_path)
-    if args.text_col not in df.columns or args.label_col not in df.columns:
-        raise ValueError(
-            f"Ожидаются колонки '{args.text_col}' и '{args.label_col}'. "
-            f"Найдены: {list(df.columns)}"
-        )
-
-    n_before = int((df[args.label_col] != 0).sum())
-    df = fix_labels(df, text_col=args.text_col, label_col=args.label_col)
-    n_after = int(df[args.label_col].sum())
+    n_before = int((df["label"] != 0).sum())
+    df = fix_labels(df, text_col="text", label_col="label")
+    n_after = int(df["label"].sum())
     n_fixed = n_after - n_before
     print(f"Меток исправлено по CAPS_WORD: {n_fixed} (спам было {n_before}, стало {n_after})")
     print(f"Всего записей: {len(df)}, спам: {n_after} ({100 * n_after / len(df):.1f}%)")
@@ -101,13 +173,13 @@ def main() -> None:
     df_train, df_rest = train_test_split(
         df,
         test_size=0.4,
-        stratify=df[args.label_col],
+        stratify=df["label"],
         random_state=args.random_state,
     )
     df_val, df_test = train_test_split(
         df_rest,
         test_size=0.5,
-        stratify=df_rest[args.label_col],
+        stratify=df_rest["label"],
         random_state=args.random_state,
     )
 
