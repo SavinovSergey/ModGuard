@@ -14,9 +14,9 @@ class Settings(BaseSettings):
     )
     
     # Модель
-    model_type: str = "bert"  # regex, tfidf, fasttext, rnn, bert
+    model_type: str = "tfidf"  # regex, tfidf, fasttext, rnn, bert
     model_path: Optional[str] = None
-    fallback_chain: List[str] = ["bert", "rnn", "tfidf", "regex"]
+    fallback_chain: List[str] = ["tfidf", "bert", "rnn", "regex"]
     
     # BERT (опционально): если локальная директория моделей отсутствует,
     # можно грузить модель из HuggingFace по model-id (уменьшает размер репозитория).
