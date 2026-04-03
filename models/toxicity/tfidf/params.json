@@ -1,18 +1,18 @@
 {
   "best_params": {
-    "max_features": 150000,
+    "max_features": 120000,
     "min_ngram": 3,
     "max_ngram": 6,
-    "use_idf": false,
+    "use_idf": true,
     "norm": "l2",
-    "min_df": 15,
-    "max_df": 0.7507763244648757,
+    "min_df": 8,
+    "max_df": 0.6316570062766683,
     "sublinear_tf": true,
-    "C": 7.557285076622611
+    "C": 5.022242708407757
   },
-  "best_score": 0.9655331055051162,
+  "best_score": 0.9720797051848395,
   "best_score_metric": "average_precision",
-  "optimal_threshold": 0.6200846516159235,
+  "optimal_threshold": 0.6117709633110597,
   "n_folds": 5,
   "random_state": 42
 }
