@@ -6,11 +6,11 @@ pydantic-settings>=2.1.0
 httpx==0.28.1
 
 # ML и обработка данных
-# Для Python 3.10 используем numpy < 2.0 для совместимости с FastText
+# Для Python 3.11 используем numpy < 2.0 для совместимости с FastText
 numpy>=1.26.1,<2.0.0
 pandas>=1.5.0,<3.0.0
 pyarrow
-scikit-learn>=1.0.0
+scikit-learn>=1.8.0
 optuna>=3.0.0  # Для оптимизации гиперпараметров
 
 # NLP библиотеки
@@ -32,7 +32,8 @@ pytest-asyncio>=0.21.0  # Для тестирования async endpoints
 # PyTorch не указан здесь: в Docker ставится явно (только CPU или только CUDA) по build-arg DEVICE.
 # Локально CPU: pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Локально GPU: pip install torch --index-url https://download.pytorch.org/whl/cu118
-transformers>=4.20.0  # Совместим с Python 3.10 (зависимость torch уже установлена выше в Dockerfile)
+transformers>=4.20.0  # Совместим с Python 3.11 (зависимость torch уже установлена выше в Dockerfile)
+datasets>=2.0.0
 
 # ONNX Runtime и BERT (CPU)
 optimum[onnxruntime]>=1.14.0
