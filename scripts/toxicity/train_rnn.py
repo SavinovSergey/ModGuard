@@ -29,11 +29,11 @@ from scripts.shared.cli import (
     add_common_random_state_arg,
 )
 from scripts.shared.common import (
-    BinaryFocalLoss,
     compute_auto_alpha,
     convert_to_json_serializable,
     find_threshold_max_f1_min_precision,
 )
+from scripts.shared.binary_focal_loss import BinaryFocalLoss
 from scripts.shared.data import load_train_val_data, prepare_texts_neural
 from scripts.shared.bucketing import get_bucket_boundaries, BucketBatchSampler
 

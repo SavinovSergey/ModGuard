@@ -213,7 +213,8 @@ python scripts/run/clear_redis.py
 | Скрипт | Назначение |
 |--------|------------|
 | `scripts/shared/cli.py` | Общие аргументы CLI для скриптов обучения (`--train-data`, `--val-data`, `--output-dir`, `--random-state`, Optuna и др.). Не запускается напрямую. |
-| `scripts/shared/common.py` | Общие функции (подбор порога, loss и т.д.). |
+| `scripts/shared/common.py` | Подбор порога, `compute_auto_alpha`, JSON-сериализация (numpy/sklearn, без PyTorch — для `validate_*.py`). |
+| `scripts/shared/binary_focal_loss.py` | `BinaryFocalLoss` для обучения RNN/BERT (требует torch). |
 | `scripts/shared/data.py` | Загрузка и подготовка данных (train/val, препроцессинг для токсичности/спама). |
 | `scripts/augment_data.py` | Аугментация датасета для обучения. |
 
