@@ -7,7 +7,7 @@
 | Файл | Назначение |
 |------|------------|
 | `docker/Dockerfile.api` | Образ для API и для listener/actions (Python, FastAPI). |
-| `docker/Dockerfile.backend` | Образ воркера классификации (полный ML-стек: токсичность и спам). |
+| `docker/Dockerfile.backend` | Образ воркера классификации (профили: `core` — TF-IDF/regex, `full` — все модели). |
 | `docker/frontend/Dockerfile` | Статика фронтенда (nginx). |
 | `docker/frontend/nginx.conf` | Конфигурация nginx для фронта. |
 
@@ -60,13 +60,28 @@ docker compose --profile telegram up -d
 - `./models` → `/app/models` в контейнере backend (артефакты моделей).
 - По умолчанию данные Redis и Postgres хранятся в именованных томах `redis_data`, `postgres_data`.
 
-## Сборка воркера с GPU
+## Профили сборки воркера
+
+`Dockerfile.backend` поддерживает два build-аргумента:
+
+| Аргумент | Значения | По умолчанию | Описание |
+|----------|----------|--------------|----------|
+| `DEPS` | `core`, `full` | `core` | Набор ML-зависимостей |
+| `DEVICE` | `cpu`, `gpu` | `cpu` | CPU или GPU (PyTorch + ONNX Runtime) |
+
+- **core** — TF-IDF + regex (без PyTorch, ~400 МБ вместо ~1.5 ГБ);
+- **full** — все модели (RNN, BERT ONNX, FastText, PyTorch).
 
 ```bash
-docker compose build backend --build-arg DEVICE=gpu
-```
+# CPU, только TF-IDF/regex (по умолчанию)
+docker compose build backend
 
-Используется тот же `docker/Dockerfile.backend` с аргументом `DEVICE=gpu` (устанавливается PyTorch с CUDA).
+# CPU, все модели
+docker compose build backend --build-arg DEPS=full
+
+# GPU, все модели
+docker compose build backend --build-arg DEPS=full --build-arg DEVICE=gpu
+```
 
 ## Healthcheck
 

@@ -1,7 +1,6 @@
 # Дополнительные зависимости для сборки образа с DEVICE=gpu.
-# Устанавливаются после requirements.txt при docker build --build-arg DEVICE=gpu.
+# Устанавливаются после основных requirements при docker build --build-arg DEVICE=gpu.
 # PyTorch CUDA ставится в Dockerfile до этого файла.
 
-# ONNX Runtime для GPU (вместо CPU-версии из requirements.txt)
 onnxruntime-gpu>=1.15.0
 optimum[onnxruntime-gpu]>=1.14.0

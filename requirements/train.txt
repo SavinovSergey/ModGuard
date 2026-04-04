@@ -1,0 +1,9 @@
+# Обучение моделей: оптимизация гиперпараметров, аугментация и т.д.
+# Дополняет data.txt.
+
+-r data.txt
+
+optuna>=3.0.0
+accelerate>=1.1.0
+sentencepiece>=0.1.95
+sacremoses>=0.1.1

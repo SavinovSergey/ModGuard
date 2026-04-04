@@ -1,0 +1,10 @@
+# Данные: загрузка датасетов, подготовка, валидация моделей (validate_*.py).
+# Дополняет core.txt.
+
+-r core.txt
+
+pandas>=1.5.0,<3.0.0
+pyarrow
+datasets>=2.0.0
+matplotlib>=3.7.0
+tqdm>=4.65.0

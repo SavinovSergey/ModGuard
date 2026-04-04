@@ -1,0 +1,9 @@
+# BERT ONNX inference (без PyTorch, лёгкая версия).
+# Для конвертации в ONNX также нужен optimum — см. train.txt.
+
+-r core.txt
+
+transformers>=4.20.0
+tokenizers>=0.13.0
+onnxruntime>=1.15.0
+optimum[onnxruntime]>=1.14.0

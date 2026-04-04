@@ -1,0 +1,26 @@
+# Ядро: API-сервер + worker (inference TF-IDF, regex; препроцессинг)
+# Минимальный набор для запуска сервиса без тяжёлых ML-фреймворков.
+
+# FastAPI и сервер
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+httpx==0.28.1
+python-multipart>=0.0.6
+
+# Инфраструктура (Redis, RabbitMQ, PostgreSQL)
+redis>=5.0.0
+pika>=1.3.0
+psycopg2-binary>=2.9.0
+requests>=2.31.0
+
+# ML-core (inference TF-IDF / regex)
+numpy>=1.26.1,<2.0.0
+scikit-learn>=1.8.0
+scipy>=1.11.0
+
+# NLP-препроцессинг
+pymorphy3>=0.2.0
+nltk>=3.8.1
+emoji>=2.8.0

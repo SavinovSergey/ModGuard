@@ -1,0 +1,9 @@
+# PyTorch-зависимые модели (RNN, BERT-PyTorch).
+# PyTorch ставится ОТДЕЛЬНО перед этим файлом:
+#   CPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   GPU:  pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+-r core.txt
+
+transformers>=4.20.0
+tokenizers>=0.13.0

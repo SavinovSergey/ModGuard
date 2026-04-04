@@ -1,0 +1,5 @@
+# FastText-модель токсичности.
+
+-r core.txt
+
+fasttext>=0.9.2

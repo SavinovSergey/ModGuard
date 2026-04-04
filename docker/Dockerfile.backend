@@ -1,13 +1,22 @@
-# Образ backend (worker): классификация токсичности и спама (полный ML-стек)
-# Используем Python 3.10 для совместимости с FastText и numpy < 2.0
+# Образ backend (worker): классификация токсичности и спама
 #
 # Сборка:
 #   CPU (по умолчанию):  docker build -f docker/Dockerfile.backend -t worker .
 #   GPU:                 docker build -f docker/Dockerfile.backend --build-arg DEVICE=gpu -t worker:gpu .
+#
+# Профили зависимостей (DEPS build-arg):
+#   core      — TF-IDF + regex (по умолчанию, самый лёгкий)
+#   full      — все модели (core + torch + bert-onnx + fasttext)
+#
+# Примеры:
+#   docker build -f docker/Dockerfile.backend -t worker .                              # CPU, TF-IDF/regex
+#   docker build -f docker/Dockerfile.backend --build-arg DEPS=full -t worker:full .   # CPU, все модели
+#   docker build -f docker/Dockerfile.backend --build-arg DEPS=full --build-arg DEVICE=gpu -t worker:gpu .
 
-FROM python:3.11-slim as base
+FROM python:3.11-slim AS base
 
 ARG DEVICE=cpu
+ARG DEPS=core
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -17,17 +26,24 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-gpu.txt ./
+COPY requirements/ ./requirements/
 
-# PyTorch явно: только CPU или CUDA-шины (индексы PyTorch), затем остальные зависимости
 RUN pip install --no-cache-dir --upgrade pip && \
-    if [ "$DEVICE" = "gpu" ]; then \
-        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu118 && \
-        pip install --no-cache-dir -r requirements.txt && \
-        pip install --no-cache-dir -r requirements-gpu.txt; \
+    if [ "$DEPS" = "full" ]; then \
+        if [ "$DEVICE" = "gpu" ]; then \
+            pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu118; \
+        else \
+            pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; \
+        fi && \
+        pip install --no-cache-dir -r requirements/core.txt \
+                                   -r requirements/torch.txt \
+                                   -r requirements/bert.txt \
+                                   -r requirements/fasttext.txt && \
+        if [ "$DEVICE" = "gpu" ]; then \
+            pip install --no-cache-dir -r requirements/gpu.txt; \
+        fi; \
     else \
-        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-        pip install --no-cache-dir -r requirements.txt; \
+        pip install --no-cache-dir -r requirements/core.txt; \
     fi
 
 FROM python:3.11-slim

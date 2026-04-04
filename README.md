@@ -58,7 +58,9 @@ docker compose up -d
 | Демо-чат | http://localhost:8080 |
 | RabbitMQ Management | http://localhost:15672 (guest / guest) |
 
-Для сборки worker с GPU: `docker compose build backend --build-arg DEVICE=gpu`.  
+По умолчанию worker собирается с минимальными зависимостями (TF-IDF + regex, без PyTorch).  
+Для сборки со всеми моделями: `docker compose build backend --build-arg DEPS=full`.  
+Для GPU: `docker compose build backend --build-arg DEPS=full --build-arg DEVICE=gpu`.  
 Для подключения Telegram-бота: `docker compose --profile telegram up -d` (предварительно указав 
 `TELEGRAM_BOT_TOKEN` в `.env`).
 
@@ -73,22 +75,48 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 2. Установите PyTorch
+### 2. Установите зависимости
 
-PyTorch ставится отдельно, чтобы выбрать CPU или GPU версию.
+Зависимости разбиты на профили в папке `requirements/` — устанавливайте только то, что нужно:
+
+| Файл | Что включает | Когда нужен |
+|---|---|---|
+| `requirements/core.txt` | FastAPI, sklearn, NLP-препроцессинг, Redis/RabbitMQ/Postgres | API + worker (TF-IDF/regex) |
+| `requirements/data.txt` | + pandas, datasets, matplotlib, tqdm | Загрузка данных, валидация (`validate_*.py`) |
+| `requirements/train.txt` | + optuna, accelerate, sentencepiece | Обучение моделей |
+| `requirements/torch.txt` | + transformers, tokenizers | RNN и BERT-PyTorch модели |
+| `requirements/bert.txt` | + onnxruntime, optimum | BERT ONNX inference |
+| `requirements/fasttext.txt` | + fasttext | FastText-модель |
+| `requirements/test.txt` | pytest, pytest-cov, pytest-asyncio | Тесты |
+| `requirements/all.txt` | Все вышеперечисленные | Полная установка |
+
+**Минимум для запуска сервиса (TF-IDF + regex):**
 
 ```bash
-# CPU
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# GPU (CUDA 11.8)
-pip install torch --index-url https://download.pytorch.org/whl/cu118
+pip install -r requirements/core.txt
 ```
 
-### 3. Установите остальные зависимости
+**Для запуска валидации (`validate_*.py`) и подготовки данных:**
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements/data.txt -r requirements/test.txt
+```
+
+**Для работы с PyTorch-моделями (RNN, BERT):**
+
+```bash
+# Сначала PyTorch (CPU или GPU)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+# или GPU: pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+pip install -r requirements/torch.txt
+```
+
+**Полная установка (все модели + обучение + тесты):**
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements/all.txt
 ```
 
 ### 4. Поднимите инфраструктуру

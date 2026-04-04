@@ -227,7 +227,8 @@ python scripts/augment_data.py
 
 ## Зависимости
 
-- Для обучения BERT/RNN: PyTorch, transformers, зависимости из `requirements-api.txt` и скриптов.
-- Для Optuna (train_tfidf, train_spam): `pip install optuna`.
-- Для валидации спама (tfidf) с графиками: `pip install matplotlib`.
+- Минимум для API/воркера (TF-IDF/regex): `pip install -r requirements/core.txt`.
+- Для валидации и подготовки данных: `pip install -r requirements/data.txt`.
+- Для обучения (optuna, accelerate и т.д.): `pip install -r requirements/train.txt`.
+- Для обучения BERT/RNN: PyTorch + `pip install -r requirements/torch.txt`.
 - Для воркера и listener/actions: RabbitMQ, Postgres, при необходимости Redis; переменные окружения из `.env.example`.

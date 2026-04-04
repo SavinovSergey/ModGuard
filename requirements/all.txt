@@ -1,0 +1,10 @@
+# Полный набор зависимостей (все модели + обучение + тесты).
+# PyTorch ставится ОТДЕЛЬНО перед этим файлом:
+#   CPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   GPU:  pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+-r train.txt
+-r torch.txt
+-r bert.txt
+-r fasttext.txt
+-r test.txt

@@ -36,7 +36,17 @@
 │   └── spam/               # Подкаталоги: regex, tfidf
 ├── data/                   # Данные (датасеты, разбиения)
 ├── spam_data/              # Данные для обучения/валидации спама
-├── requirements-api.txt    # Зависимости для API
+├── requirements/           # Зависимости (разделены по профилям)
+│   ├── core.txt            # API + worker (TF-IDF/regex)
+│   ├── api.txt             # Только API (без ML)
+│   ├── data.txt            # + pandas, datasets, валидация
+│   ├── train.txt           # + optuna, обучение
+│   ├── torch.txt           # + PyTorch-модели (RNN, BERT)
+│   ├── bert.txt            # + BERT ONNX inference
+│   ├── fasttext.txt        # + FastText
+│   ├── gpu.txt             # + ONNX Runtime GPU
+│   ├── test.txt            # pytest
+│   └── all.txt             # Всё вместе
 ├── .env.example            # Пример переменных окружения
 └── README.md
 ```
