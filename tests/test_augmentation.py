@@ -1,6 +1,8 @@
 """Тесты для модуля аугментации данных"""
 import pytest
-import pandas as pd
+
+pd = pytest.importorskip("pandas", reason="pandas не установлен — тесты аугментации пропущены")
+
 import numpy as np
 from unittest.mock import Mock, patch
 

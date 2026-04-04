@@ -1,4 +1,10 @@
+import pytest
 from unittest.mock import MagicMock, patch
+
+pd = pytest.importorskip("pandas", reason="pandas не установлен")
+pytest.importorskip("matplotlib", reason="matplotlib не установлен")
+pytest.importorskip("torch", reason="PyTorch не установлен")
+pytest.importorskip("transformers", reason="transformers не установлен")
 
 
 def test_validate_toxicity_bert_accepts_hf_model_id():

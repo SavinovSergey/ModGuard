@@ -3,7 +3,8 @@ import pytest
 import tempfile
 from pathlib import Path
 import numpy as np
-import fasttext
+
+ft = pytest.importorskip("fasttext", reason="fasttext не установлен — тесты FastText пропущены")
 
 from app.models.toxicity.fasttext_model import FastTextModel
 from app.preprocessing.text_processor import TextProcessor
@@ -37,7 +38,7 @@ def temp_model_file():
                 f.write(f"{label_str} {text}\n")
         
         # Обучаем FastText модель через train_supervised
-        fasttext_model = fasttext.train_supervised(
+        fasttext_model = ft.train_supervised(
             str(fasttext_data_path),
             dim=100,  # Меньшая размерность для быстрых тестов
             epoch=5,

@@ -1,6 +1,8 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
+transformers = pytest.importorskip("transformers", reason="transformers не установлен — тест квантизации BERT ONNX пропущен")
+
 
 def test_quantize_bert_to_onnx_cpu_accepts_hf_model_id(tmp_path):
     """

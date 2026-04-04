@@ -2,6 +2,10 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+torch = pytest.importorskip("torch", reason="PyTorch не установлен — тест квантизации RNN пропущен")
+
 
 def test_quantize_rnn_from_hf_downloads_and_calls_quantize(tmp_path):
     """

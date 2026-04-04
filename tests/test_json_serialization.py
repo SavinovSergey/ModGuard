@@ -3,10 +3,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 # Добавляем путь к проекту
 sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
+
+torch = pytest.importorskip("torch", reason="PyTorch не установлен — тесты JSON-сериализации RNN пропущены")
 from scripts.toxicity.train_rnn import RNNModelTrainer
 
 def test_convert_to_json_serializable():

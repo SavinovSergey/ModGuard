@@ -6,8 +6,9 @@ import os
 
 from sklearn.metrics import f1_score, precision_score, recall_score
 
-from app.models.toxicity.bert_model import BERTModel, _ONNX_FILES
 from .toxicity_quality_examples import get_toxicity_quality_texts_and_labels
+
+_ONNX_FILES = ("model_quantized.onnx", "model.onnx")
 
 
 def _has_pytorch_bert(path: Path) -> bool:
@@ -41,7 +42,10 @@ def _load_tfidf_model():
 
 
 def _load_fasttext_model():
-    from app.models.toxicity.fasttext_model import FastTextModel
+    try:
+        from app.models.toxicity.fasttext_model import FastTextModel
+    except ImportError:
+        return None
     model_path = Path("models/toxicity/fasttext/fasttext_model.bin")
     if not model_path.exists():
         return None
@@ -51,7 +55,10 @@ def _load_fasttext_model():
 
 
 def _load_rnn_model():
-    from app.models.toxicity.rnn_model import RNNModel
+    try:
+        from app.models.toxicity.rnn_model import RNNModel
+    except ImportError:
+        return None
     rnn_dir = Path("models/toxicity/rnn")
     tokenizer_path = rnn_dir / "tokenizer.json"
     model_path = rnn_dir / "model_quantized.pt"
@@ -69,10 +76,14 @@ def _load_bert_model():
     Загружает BERT: при наличии PyTorch в models/toxicity/bert — только его (без fallback на ONNX при ошибке),
     иначе ONNX из models/toxicity/bert/onnx или models/toxicity/bert/onnx_cpu.
     """
+    try:
+        from app.models.toxicity.bert_model import BERTModel
+    except ImportError:
+        return None
+
     model_path = Path("models/toxicity/bert")
     if model_path.exists() and (model_path / "config.json").exists():
         if _has_pytorch_bert(model_path):
-            # Пробуем только PyTorch; при ошибке не переходим на ONNX, чтобы F1 не прыгал между запусками
             model = BERTModel(model_path=str(model_path), use_onnx=False)
             model.load()
             return model
@@ -92,13 +103,11 @@ def _load_bert_model():
             except Exception:
                 continue
 
-    # Fallback: попытка загрузить BERT из HuggingFace (если локальные артефакты отсутствуют)
     hf_model_name = os.environ.get(
         "BERT_HF_MODEL_NAME",
         "SergeySavinov/rubert-tiny-toxicity",
     )
     try:
-        # Хранимое на HF обычно — PyTorch, принудительно отключаем ONNX
         model = BERTModel(model_name=hf_model_name, use_onnx=False)
         model.load()
         return model
@@ -150,7 +159,7 @@ def test_toxicity_quality_fasttext():
     """Качество FastText модели на наборе из toxicity_quality_examples."""
     model = _load_fasttext_model()
     if model is None:
-        pytest.skip("Модель models/toxicity/fasttext не найдена (запустите обучение)")
+        pytest.skip("FastText модель не найдена или fasttext не установлен")
     _run_quality_test(model, "fasttext")
 
 
@@ -158,7 +167,7 @@ def test_toxicity_quality_rnn():
     """Качество RNN модели на наборе из toxicity_quality_examples."""
     model = _load_rnn_model()
     if model is None:
-        pytest.skip("Модель models/toxicity/rnn не найдена (запустите обучение)")
+        pytest.skip("RNN модель не найдена или torch не установлен")
     _run_quality_test(model, "rnn")
 
 

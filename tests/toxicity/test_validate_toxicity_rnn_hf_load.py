@@ -1,8 +1,12 @@
+import pytest
 from unittest.mock import MagicMock, patch
+
+pd = pytest.importorskip("pandas", reason="pandas не установлен")
+pytest.importorskip("matplotlib", reason="matplotlib не установлен")
+pytest.importorskip("torch", reason="PyTorch не установлен")
 
 
 def test_validate_toxicity_rnn_accepts_hf_model_id():
-    # Import внутри теста, чтобы убедиться что файл парсится без запуска сети
     from scripts.toxicity.validate_toxicity import _load_model
 
     hf_id = "SergeySavinov/rurnn-toxicity"

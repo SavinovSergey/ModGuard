@@ -3,6 +3,9 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+torch = pytest.importorskip("torch", reason="PyTorch не установлен — тесты BERT пропущены")
+transformers = pytest.importorskip("transformers", reason="transformers не установлен — тесты BERT пропущены")
+
 from app.models.toxicity.bert_model import BERTModel, _ONNX_FILES
 
 

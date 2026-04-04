@@ -2,8 +2,9 @@
 import pytest
 import tempfile
 from pathlib import Path
-import torch
 import numpy as np
+
+torch = pytest.importorskip("torch", reason="PyTorch не установлен — тесты обучения RNN пропущены")
 
 from app.models.toxicity.rnn_dataset import ToxicityDataset, collate_fn
 from app.models.toxicity.rnn_tokenizers import BPETokenizer
