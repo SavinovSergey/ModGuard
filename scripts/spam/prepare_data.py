@@ -34,10 +34,14 @@ print(f"Dataset {ds_name} loaded")
 # print(f"Data for dataset {ds_name} prepared")
 
 print("Split train/val/test and saving data...")
-train_df, test_df = ds['train'].to_pandas(), ds['test'].to_pandas()
+train_df = ds['train'].to_pandas()
+if 'test' in ds:
+    test_df = ds['test'].to_pandas()
+else:
+    train_df, test_df = train_test_split(train_df, test_size=0.2, random_state=42, stratify=train_df['label'])
 train_df = train_df[train_df['text'] != '']
 train_df = train_df.drop_duplicates()
-train_df, val_df = train_test_split(train_df, test_size=0.2, random_state=42, stratify=train_df['label'])
+train_df, val_df = train_test_split(train_df, test_size=0.25, random_state=42, stratify=train_df['label'])
 
 os.makedirs('./data/spam', exist_ok=True)
 train_df.to_parquet("./data/spam/train.parquet")
