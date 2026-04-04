@@ -273,7 +273,8 @@ python scripts/spam/validate_spam.py \
 ## Производительность
 
 Результаты нагрузочного и latency-тестирования на полном стенде (API → RabbitMQ → worker → PostgreSQL/Redis).  
-Скрипт: `scripts/run/validate_chain.py`. Окружение: **CPU-only** (AMD Ryzen 7 8845H, 8C/16T, 3.8 GHz).
+Скрипт: `scripts/run/validate_chain.py`. Окружение: **CPU-only** (AMD Ryzen 7 8845H, 8C/16T, 3.8 GHz, 32GB RAM).
+
 
 ### Batch under load
 
@@ -281,15 +282,10 @@ python scripts/spam/validate_spam.py \
 |---|---|
 | Throughput | **753 msg/sec** |
 | Обработано результатов | 78138 |
-| Success rate | **100%** (101/101 задач) |
+| Success rate | **100%** (89/89 задач) |
 | Cache hit rate | 16.7% |
-| Batch e2e latency p50 | 11.3 s |
-| Batch e2e latency p95 | 31.6 s |
-| Batch e2e latency p99 | 33.5 s |
-| Среднее время отправки батча | 278 ms |
 
-### Timings
-| Метрика, ms | p50 | p95 | p99 |
+| Time, ms | p50 | p95 | p99 |
 |---|---|---|---|
 | Batch sending cold | 203 | 233 | 271 |
 | Batch sending hot | 379 | 408 | 412 |
