@@ -6,7 +6,7 @@ import os
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from app.preprocessing.text_processor import SpamTextProcessor
+from app.preprocessing.spam_processor import SpamTextProcessor
 from app.models.spam.regex_model import SpamRegexModel
 from datasets import Dataset, load_dataset
 from sklearn.model_selection import train_test_split
