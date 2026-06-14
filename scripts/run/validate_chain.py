@@ -3,7 +3,7 @@
 Валидация цепочки: API → очередь → воркер → Postgres/кэш.
 
 Загружает тексты из parquet/csv, отправляет батчами через POST /classify/batch-async,
-опрашивает GET /tasks/{task_id} до завершения (HTTP — httpx + asyncio.gather). Часть сообщений отправляется повторно
+опрашивает GET /tasks/{task_id} до завершения (HTTP — httpx + asyncio.TaskGroup). Часть сообщений отправляется повторно
 (дубликаты) для проверки кэша; в отчёте сравниваются cold-батчи (первая волна) и hot-батчи
 (содержат повтор). После батч-теста — single-message latency с логом пауз опроса (poll_interval).
 
@@ -361,6 +361,13 @@ async def _poll_one_task_async(
         return tid, None, 0, str(e)
 
 
+async def _run_task_group(awaitables: list) -> list:
+    """Structured concurrency: все задачи завершаются или отменяются вместе."""
+    async with asyncio.TaskGroup() as tg:
+        tasks = [tg.create_task(coro) for coro in awaitables]
+    return [t.result() for t in tasks]
+
+
 async def poll_until_done_async(
     client: httpx.AsyncClient,
     api_url: str,
@@ -368,7 +375,7 @@ async def poll_until_done_async(
     poll_interval: float,
     timeout: float,
 ) -> dict:
-    """Опрашивает GET /tasks/{task_id} через asyncio.gather, пока все не завершены."""
+    """Опрашивает GET /tasks/{task_id} через asyncio.TaskGroup, пока все не завершены."""
     url_base = f"{api_url.rstrip('/')}/api/v1/tasks"
     started = time.perf_counter()
     statuses: dict[str, str | None] = {tid: None for tid in task_ids}
@@ -380,8 +387,8 @@ async def poll_until_done_async(
         pending = [tid for tid in task_ids if statuses[tid] not in terminal]
         if not pending:
             break
-        outcomes = await asyncio.gather(
-            *[_poll_one_task_async(client, url_base, tid) for tid in pending]
+        outcomes = await _run_task_group(
+            [_poll_one_task_async(client, url_base, tid) for tid in pending]
         )
         still_pending = False
         for tid, st, n_res, err in outcomes:
@@ -473,7 +480,7 @@ async def send_prepared_batches_async(
     send_workers: int,
     send_timeout: float,
 ) -> tuple[list[dict[str, Any]], float]:
-    """Параллельная отправка батчей через asyncio.gather (+ опциональный Semaphore)."""
+    """Параллельная отправка батчей через asyncio.TaskGroup (+ опциональный Semaphore)."""
     limits = httpx.Limits(
         max_connections=send_workers if send_workers > 0 else max(32, len(prepared_batches)),
         max_keepalive_connections=send_workers if send_workers > 0 else 32,
@@ -481,20 +488,24 @@ async def send_prepared_batches_async(
     timeout = httpx.Timeout(send_timeout, connect=10.0)
     sem = asyncio.Semaphore(send_workers) if send_workers > 0 else None
 
-    async def _limited_send(prep: dict[str, Any]) -> dict[str, Any]:
-        if sem is not None:
-            async with sem:
-                return await _send_prepared_batch(client, api_url, prep)
-        return await _send_prepared_batch(client, api_url, prep)
-
     send_wall_start = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         pbar = tqdm(total=len(prepared_batches), desc="Отправка батчей", unit="batch")
-        tasks = [asyncio.create_task(_limited_send(prep)) for prep in prepared_batches]
-        send_results: list[dict[str, Any]] = []
-        for coro in asyncio.as_completed(tasks):
-            send_results.append(await coro)
-            pbar.update(1)
+
+        async def _limited_send(prep: dict[str, Any]) -> dict[str, Any]:
+            try:
+                if sem is not None:
+                    async with sem:
+                        return await _send_prepared_batch(client, api_url, prep)
+                return await _send_prepared_batch(client, api_url, prep)
+            finally:
+                pbar.update(1)
+
+        async with asyncio.TaskGroup() as tg:
+            send_tasks = [
+                tg.create_task(_limited_send(prep)) for prep in prepared_batches
+            ]
+        send_results = [t.result() for t in send_tasks]
         pbar.close()
     send_wall = time.perf_counter() - send_wall_start
     return send_results, send_wall
@@ -563,8 +574,8 @@ async def run_chain_http_async(
                     if summary["statuses"].get(tid) == "completed"
                 ]
                 if completed_tids:
-                    outcomes = await asyncio.gather(
-                        *[
+                    outcomes = await _run_task_group(
+                        [
                             fetch_task_results_async(client, api_url, tid)
                             for tid in completed_tids
                         ]
@@ -920,7 +931,7 @@ def run(
     print(f"batch_size={batch_size}, window={batch_window_sec}s, delay={delay_min_ms}-{delay_max_ms}ms")
     print(f"Дубликаты: {len(dup_indices)} через {duplicate_after_sec}s")
     print(f"Ожидаемое число батчей: {n_batches}")
-    print(f"HTTP: asyncio.gather, send_workers={send_workers or '∞'}")
+    print(f"HTTP: asyncio.TaskGroup, send_workers={send_workers or '∞'}")
 
     need_quality = any(t is not None for t in tox_labels) or any(s is not None for s in spam_labels)
 
