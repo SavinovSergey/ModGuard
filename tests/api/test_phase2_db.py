@@ -28,6 +28,17 @@ def database_url():
     return url
 
 
+@pytest.fixture(scope="module")
+def db_pool(database_url):
+    """Sync init: таблицы + asyncpg pool для async CRUD."""
+    from app.core.db import close_pool, init_db, init_pool, run_db
+
+    assert init_db() is True
+    assert run_db(init_pool()) is True
+    yield
+    run_db(close_pool())
+
+
 @pytest.fixture
 def task_id():
     return str(uuid.uuid4())
@@ -36,52 +47,63 @@ def task_id():
 def test_init_db(database_url):
     """init_db создаёт таблицу без ошибок."""
     from app.core.db import init_db
+
     assert init_db() is True
 
 
-def test_create_and_get_task_queued(database_url, task_id):
+def test_create_and_get_task_queued(db_pool, task_id):
     """create_task_pg и get_task_pg: задача в статусе queued."""
-    from app.core.db import create_task_pg, get_task_pg
+    from app.core.db import create_task_pg, get_task_pg, run_db
+
     items = [{"id": "1", "text": "hello"}, {"id": "2", "text": "world"}]
-    create_task_pg(task_id, items, source="test")
-    data = get_task_pg(task_id)
+    run_db(create_task_pg(task_id, items, source="test"))
+    data = run_db(get_task_pg(task_id))
     assert data is not None
     assert data["status"] == "queued"
     assert data["results"] is None
     assert data["error"] is None
 
 
-def test_set_result_and_get_task_completed(database_url, task_id):
+def test_set_result_and_get_task_completed(db_pool, task_id):
     """set_task_result_pg и get_task_pg: статус completed и results."""
-    from app.core.db import create_task_pg, set_task_result_pg, get_task_pg
+    from app.core.db import create_task_pg, get_task_pg, run_db, set_task_result_pg
+
     items = [{"id": "1", "text": "a"}]
-    create_task_pg(task_id, items)
+    run_db(create_task_pg(task_id, items))
     results = [
-        {"is_toxic": False, "toxicity_score": 0.1, "toxicity_types": {}, "tox_model_used": "regex", "spam_model_used": None},
+        {
+            "is_toxic": False,
+            "toxicity_score": 0.1,
+            "toxicity_types": {},
+            "tox_model_used": "regex",
+            "spam_model_used": None,
+        },
     ]
-    set_task_result_pg(task_id, results, status="completed")
-    data = get_task_pg(task_id)
+    run_db(set_task_result_pg(task_id, results, status="completed"))
+    data = run_db(get_task_pg(task_id))
     assert data is not None
     assert data["status"] == "completed"
     assert data["results"] is not None
     assert len(data["results"]) == 1
     assert data["results"][0]["is_toxic"] is False
-    assert data["results"][0]["toxicity_score"] == 0.1
+    assert data["results"][0]["toxicity_score"] == pytest.approx(0.1)
 
 
-def test_set_failed_and_get_task(database_url, task_id):
+def test_set_failed_and_get_task(db_pool, task_id):
     """set_task_failed_pg и get_task_pg: статус failed и error."""
-    from app.core.db import create_task_pg, set_task_failed_pg, get_task_pg
-    create_task_pg(task_id, [{"text": "x"}])
-    set_task_failed_pg(task_id, "Something broke")
-    data = get_task_pg(task_id)
+    from app.core.db import create_task_pg, get_task_pg, run_db, set_task_failed_pg
+
+    run_db(create_task_pg(task_id, [{"text": "x"}]))
+    run_db(set_task_failed_pg(task_id, "Something broke"))
+    data = run_db(get_task_pg(task_id))
     assert data is not None
     assert data["status"] == "failed"
     assert data["error"] == "Something broke"
 
 
-def test_get_task_nonexistent(database_url):
+def test_get_task_nonexistent(db_pool):
     """get_task_pg возвращает None для несуществующего task_id."""
-    from app.core.db import get_task_pg
-    data = get_task_pg("00000000-0000-0000-0000-000000000000")
+    from app.core.db import get_task_pg, run_db
+
+    data = run_db(get_task_pg("00000000-0000-0000-0000-000000000000"))
     assert data is None
