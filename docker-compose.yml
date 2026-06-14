@@ -47,9 +47,10 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
-    container_name: modguard-worker
+    #container_name: modguard-worker
     command: ["python", "scripts/run/run_worker.py"]
     environment:
+      - MODERATION_PIPELINE=both
       - MODEL_TYPE=regex
       - LOG_LEVEL=INFO
       - REDIS_URL=redis://redis:6379/0

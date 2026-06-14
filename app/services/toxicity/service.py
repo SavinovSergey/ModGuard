@@ -74,6 +74,10 @@ class ToxicityService:
 
         # Stage 2: ML-модель с fallback-цепочкой
         try:
+            model = self.model_manager.get_model_with_fallback(preferred_model)
+            if getattr(model, "model_name", None) == "regex":
+                # Pre-filter уже прогнал regex — повторный predict бессмысленен
+                return dict(_EMPTY)
             return self.model_manager.predict_with_fallback(text, preferred_model)
         except Exception as e:
             logger.error("Toxicity classification failed: %s", e)
@@ -134,6 +138,9 @@ class ToxicityService:
 
         # --- Phase 2: ML-модель ---
         model = self.model_manager.get_model_with_fallback(preferred_model)
+        if getattr(model, "model_name", None) == "regex":
+            # Pre-filter уже прогнал regex по ml_texts — results[idx] остаётся _EMPTY
+            return results
         try:
             batch_results = model.predict_batch(ml_texts)
             model_name = getattr(model, "model_name", None)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Воркер: потребляет очередь moderation.requests, запускает классификацию, пишет в Postgres и публикует в moderation.results."""
+"""Async worker: moderation.requests → classify → Postgres/Redis → moderation.results."""
+import asyncio
 import logging
 import os
 import sys
 
-# рабочий каталог — корень проекта (где models/)
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, _root)
 os.chdir(_root)
@@ -14,31 +14,63 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logging.getLogger("pika").setLevel(logging.WARNING)
-logging.getLogger("pika.adapters").setLevel(logging.WARNING)
+logging.getLogger("aio_pika").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
 def create_classification_service():
-    from app.core.model_manager import ModelManager
     from app.services.classification import ClassificationService
-    from app.loader import register_all_models, get_spam_model, get_spam_regex_model
 
-    model_manager = ModelManager()
-    register_all_models(model_manager)
-    spam_model = get_spam_model()
-    spam_regex_model = get_spam_regex_model()
-    return ClassificationService(
-        model_manager,
-        spam_model=spam_model,
-        spam_regex_model=spam_regex_model,
-    )
+    return ClassificationService()
 
 
-def main():
+async def process_task(
+    body: dict,
+    cache,
+    classification_service,
+) -> None:
+    from app.core.db import set_task_failed_pg, set_task_processing_pg, set_task_result_pg
+    from app.core.queue_async import publish_task_result
+
+    task_id = body.get("task_id")
+    items = body.get("items") or []
+    source = body.get("source")
+    preferred_model = body.get("preferred_model")
+    texts = [item.get("text", "") for item in items]
+    logger.info("Processing task %s, %d items", task_id, len(texts))
+
+    try:
+        await set_task_processing_pg(task_id)
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None,
+            lambda: classification_service.classify_batch(texts, preferred_model=preferred_model),
+        )
+        await set_task_result_pg(task_id, results, status="completed")
+
+        cache_pairs = [
+            (text, r)
+            for text, r in zip(texts, results)
+            if text and (r.get("tox_model_used") or r.get("spam_model_used"))
+        ]
+        n_written = await cache.aset_cached_results_batch(cache_pairs)
+
+        out_results = []
+        for i, r in enumerate(results):
+            ref = items[i].get("ref") if i < len(items) else None
+            out_results.append({"ref": ref, **r})
+        await publish_task_result(task_id, source, out_results)
+        logger.info("Task %s completed, cache_written=%d", task_id, n_written)
+    except Exception as e:
+        logger.exception("Task %s failed: %s", task_id, e)
+        await set_task_failed_pg(task_id, str(e))
+
+
+async def async_main() -> None:
     from app.core.config import settings
-    from app.core.db import init_db, set_task_processing_pg, set_task_result_pg, set_task_failed_pg
-    from app.core.queue import consume_requests, publish_task_result
-    from scripts.run.run_listener_telegram import create_cache
+    from app.core.cache import create_async_moderation_cache
+    from app.core.db import close_pool, init_db, init_pool
+    from app.core.queue_async import close_queue_publisher, consume_requests, init_queue_publisher
 
     if not settings.rabbitmq_url:
         logger.error("RABBITMQ_URL is not set")
@@ -52,46 +84,41 @@ def main():
             "Postgres init failed. Fix DATABASE_URL or run: python scripts/run/init_postgres.py"
         )
         sys.exit(1)
+    if not await init_pool():
+        logger.error("Postgres async pool init failed")
+        sys.exit(1)
+    if settings.moderation_pipeline != "both":
+        logger.warning(
+            "MODERATION_PIPELINE=%s: disabled branch returns safe stubs (benchmark mode)",
+            settings.moderation_pipeline,
+        )
+    if not await init_queue_publisher():
+        logger.error("RabbitMQ init failed. Check RABBITMQ_URL")
+        sys.exit(1)
 
-    cache = create_cache(redis_url=settings.redis_url)
+    cache = await create_async_moderation_cache(settings.redis_url)
     classification_service = create_classification_service()
+    logger.info("ClassificationService: both-mode uses ProcessPool (toxicity + spam)")
 
-    def on_message(body: dict):
-        task_id = body.get("task_id")
-        items = body.get("items") or []
-        source = body.get("source")
-        preferred_model = body.get("preferred_model")
-        texts = [item.get("text", "") for item in items]
-        logger.info("Processing task %s, %d items", task_id, len(texts))
-        try:
-            set_task_processing_pg(task_id)
-            results = classification_service.classify_batch(texts, preferred_model=preferred_model)
-            set_task_result_pg(task_id, results, status="completed")
-            # Сохраняем результаты в кэш для последующих запросов (проверка кэша — на стороне API)
-            n_written = 0
-            for text, r in zip(texts, results):
-                if text and (r.get("tox_model_used") or r.get("spam_model_used")):
-                    cache.set_cached_result(text, r, tox_model_used=r.get("tox_model_used"))
-                    n_written += 1
-            # Для Action-сервисов передаём ref (chat_id, message_id и т.д.) в каждом элементе
-            out_results = []
-            tox_used = [r.get("tox_model_used") for r in results]
-            spam_used = [r.get("spam_model_used") for r in results]
-            for i, r in enumerate(results):
-                ref = items[i].get("ref") if i < len(items) else None
-                out_results.append({"ref": ref, **r})
-            publish_task_result(task_id, source, out_results)
-            logger.info(
-                "Task %s completed, tox_model_used=%s spam_model_used=%s",
-                task_id,
-                tox_used,
-                spam_used,
-            )
-        except Exception as e:
-            logger.exception("Task %s failed: %s", task_id, e)
-            set_task_failed_pg(task_id, str(e))
+    async def on_message(body: dict) -> None:
+        await process_task(body, cache, classification_service)
 
-    consume_requests(on_message)
+    try:
+        await consume_requests(on_message, prefetch_count=5)
+    finally:
+        classification_service.shutdown()
+        await close_queue_publisher()
+        await close_pool()
+        redis_client = getattr(cache, "_redis", None)
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
+            except Exception:
+                pass
+
+
+def main() -> None:
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":

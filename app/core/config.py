@@ -1,7 +1,7 @@
 """Конфигурация приложения"""
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict
-from typing import Optional, List
+from pydantic import ConfigDict, field_validator
+from typing import Optional, List, Literal
 
 
 class Settings(BaseSettings):
@@ -40,8 +40,22 @@ class Settings(BaseSettings):
     api_description: str = "API для классификации токсичности комментариев"
     
     # Производительность
-    max_batch_size: int = 1000
+    max_batch_size: int = 3000
     workers: int = 4
+    # both — tox и spam параллельно; tox_only / spam_only — для бенчмарков (вторая ветка — заглушка)
+    moderation_pipeline: Literal["both", "tox_only", "spam_only"] = "both"
+
+    @field_validator("moderation_pipeline", mode="before")
+    @classmethod
+    def _normalize_moderation_pipeline(cls, value):
+        if value is None:
+            return "both"
+        normalized = str(value).strip().lower()
+        if normalized in ("both", "tox_only", "spam_only"):
+            return normalized
+        raise ValueError(
+            "moderation_pipeline must be one of: both, tox_only, spam_only"
+        )
     
     # Логирование
     log_level: str = "INFO"

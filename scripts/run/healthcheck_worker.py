@@ -24,11 +24,15 @@ DEADLINE_SEC = 40
 def main():
     import pika
     from app.core.config import settings
-    from app.core.db import create_task_pg, get_task_pg, delete_task_pg
+    from app.core.db import create_task_pg, get_task_pg, delete_task_pg, init_db, init_pool, run_db
 
     if not settings.database_url:
         print("healthcheck_worker: DATABASE_URL not set", file=sys.stderr)
         sys.exit(1)
+    if not init_db():
+        print("healthcheck_worker: Postgres init failed", file=sys.stderr)
+        sys.exit(1)
+    run_db(init_pool())
 
     task_id = str(uuid.uuid4())
     items_payload = [{"id": "0", "text": "healthcheck"}]
@@ -38,7 +42,7 @@ def main():
         "source": "healthcheck",
     }
 
-    create_task_pg(task_id, items_payload, source="healthcheck")
+    run_db(create_task_pg(task_id, items_payload, source="healthcheck"))
 
     url = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
     queue_requests = os.environ.get("RABBITMQ_QUEUE_REQUESTS", "moderation.requests")
@@ -63,13 +67,13 @@ def main():
 
     deadline = time.time() + DEADLINE_SEC
     while time.time() < deadline:
-        data = get_task_pg(task_id)
+        data = run_db(get_task_pg(task_id))
         if data is None:
             time.sleep(POLL_INTERVAL)
             continue
         status = data.get("status")
         if status == "completed":
-            delete_task_pg(task_id)
+            run_db(delete_task_pg(task_id))
             sys.exit(0)
         if status == "failed":
             print(f"healthcheck_worker: task {task_id} failed", file=sys.stderr)
