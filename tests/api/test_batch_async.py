@@ -1,5 +1,5 @@
 """Тесты асинхронного batch API (очередь + task_id, результат через GET /tasks)."""
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -43,8 +43,8 @@ def test_batch_async_returns_task_id(client_batch_async: TestClient):
         m.rabbitmq_url = "amqp://guest:guest@localhost:5672/"
         m.database_url = "postgresql://local/test"
         m.max_batch_size = 1000
-        with patch("app.api.routes.create_task_pg"):
-            with patch("app.api.routes.publish_task_request"):
+        with patch("app.api.routes.create_task_pg", new=AsyncMock()):
+            with patch("app.api.routes.publish_task_request", new=AsyncMock()):
                 response = client_batch_async.post(
                     "/api/v1/classify/batch-async",
                     json={"items": [{"text": "нормальный комментарий"}]},
@@ -57,7 +57,7 @@ def test_batch_async_returns_task_id(client_batch_async: TestClient):
 
 def test_get_task_not_found(client_batch_async: TestClient):
     """GET /tasks/{task_id} для несуществующего id возвращает 404."""
-    with patch("app.api.routes.get_task_pg", return_value=None):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=None)):
         response = client_batch_async.get("/api/v1/tasks/00000000-0000-0000-0000-000000000000")
     assert response.status_code == 404
 
@@ -76,8 +76,8 @@ def test_batch_async_then_get_task(client_batch_async: TestClient):
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
         m.max_batch_size = 1000
-        with patch("app.api.routes.create_task_pg"):
-            with patch("app.api.routes.publish_task_request"):
+        with patch("app.api.routes.create_task_pg", new=AsyncMock()):
+            with patch("app.api.routes.publish_task_request", new=AsyncMock()):
                 response = client_batch_async.post(
                     "/api/v1/classify/batch-async",
                     json={
@@ -90,7 +90,7 @@ def test_batch_async_then_get_task(client_batch_async: TestClient):
     assert response.status_code == 200
     task_id = response.json()["task_id"]
 
-    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=mock_result)):
         get_resp = client_batch_async.get(f"/api/v1/tasks/{task_id}")
     assert get_resp.status_code == 200
     data = get_resp.json()
@@ -105,8 +105,8 @@ def test_batch_async_respects_max_batch_size(client_batch_async: TestClient):
     with patch("app.api.routes.settings") as m:
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
-        m.max_batch_size = 1000
-        items = [{"text": f"текст {i}"} for i in range(1001)]
+        m.max_batch_size = 3000
+        items = [{"text": f"текст {i}"} for i in range(3001)]
         response = client_batch_async.post(
             "/api/v1/classify/batch-async",
             json={"items": items},
@@ -130,8 +130,8 @@ def test_classify_returns_task_id_with_queue(client_batch_async: TestClient):
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
         m.max_batch_size = 1000
-        with patch("app.api.routes.create_task_pg"):
-            with patch("app.api.routes.publish_task_request"):
+        with patch("app.api.routes.create_task_pg", new=AsyncMock()):
+            with patch("app.api.routes.publish_task_request", new=AsyncMock()):
                 response = client_batch_async.post(
                     "/api/v1/classify",
                     json={"text": "нормальный комментарий"},

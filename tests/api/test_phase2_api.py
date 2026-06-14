@@ -1,6 +1,6 @@
 """Тесты Фазы 2: API читает результат из Postgres (мок get_task_pg) и fallback на task_store."""
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -36,7 +36,7 @@ def test_get_task_reads_from_postgres_when_configured(client_phase2):
     # Маршрут вызывает get_task_pg только при settings.database_url; подменяем атрибут
     from app.api import routes
     with patch.object(routes.settings, "database_url", "postgresql://local"):
-        with patch("app.api.routes.get_task_pg", return_value=mock_result):
+        with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=mock_result)):
             response = client.get(f"/api/v1/tasks/{task_id}")
     assert response.status_code == 200
     data = response.json()
@@ -58,7 +58,7 @@ def test_get_task_fallback_to_task_store_when_postgres_returns_none(client_phase
         [{"is_toxic": False, "toxicity_score": 0.0, "toxicity_types": {}, "tox_model_used": "regex", "spam_model_used": None}],
         status="completed",
     )
-    with patch("app.api.routes.get_task_pg", return_value=None):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=None)):
         response = client.get(f"/api/v1/tasks/{task_id}")
     assert response.status_code == 200
     data = response.json()
@@ -70,6 +70,6 @@ def test_get_task_fallback_to_task_store_when_postgres_returns_none(client_phase
 def test_get_task_404_when_both_postgres_and_store_empty(client_phase2):
     """GET /tasks/{task_id} возвращает 404, если задачи нет ни в Postgres, ни в store."""
     client, _ = client_phase2
-    with patch("app.api.routes.get_task_pg", return_value=None):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=None)):
         response = client.get("/api/v1/tasks/00000000-0000-0000-0000-000000000000")
     assert response.status_code == 404

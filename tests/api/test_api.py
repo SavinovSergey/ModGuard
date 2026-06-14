@@ -1,6 +1,6 @@
 """Интеграционные тесты для API endpoints (очередь + task_id, классификация в backend)."""
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,8 +24,8 @@ def client_with_queue(client):
         mock_settings.rabbitmq_url = "amqp://guest:guest@localhost:5672/"
         mock_settings.database_url = "postgresql://local/test"
         mock_settings.max_batch_size = 1000
-        with patch("app.api.routes.create_task_pg"):
-            with patch("app.api.routes.publish_task_request"):
+        with patch("app.api.routes.create_task_pg", new=AsyncMock()):
+            with patch("app.api.routes.publish_task_request", new=AsyncMock()):
                 yield client
 
 
@@ -76,7 +76,7 @@ def test_classify_then_get_task_result(client_with_queue):
     task_id = str(uuid.uuid4())
     mock_result = _completed_result(is_toxic=False, toxicity_score=0.0)
 
-    with patch("app.api.routes.create_task_pg") as mock_create:
+    with patch("app.api.routes.create_task_pg", new=AsyncMock()) as mock_create:
         mock_create.return_value = None
         response = client_with_queue.post(
             "/api/v1/classify",
@@ -85,7 +85,7 @@ def test_classify_then_get_task_result(client_with_queue):
     assert response.status_code == 200
     task_id = response.json()["task_id"]
 
-    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=mock_result)):
         get_resp = client_with_queue.get(f"/api/v1/tasks/{task_id}")
     assert get_resp.status_code == 200
     data = get_resp.json()
@@ -102,14 +102,14 @@ def test_classify_toxic_result_via_get_task(client_with_queue):
     task_id = str(uuid.uuid4())
     mock_result = _completed_result(is_toxic=True, toxicity_score=0.9)
 
-    with patch("app.api.routes.create_task_pg"):
+    with patch("app.api.routes.create_task_pg", new=AsyncMock()):
         resp = client_with_queue.post(
             "/api/v1/classify",
             json={"text": "иди нахуй ебать"},
         )
     task_id = resp.json()["task_id"]
 
-    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=mock_result)):
         get_resp = client_with_queue.get(f"/api/v1/tasks/{task_id}")
     assert get_resp.status_code == 200
     data = get_resp.json()
@@ -179,13 +179,13 @@ def test_classify_batch_then_get_results(client_with_queue):
         ],
         "error": None,
     }
-    with patch("app.api.routes.create_task_pg"):
+    with patch("app.api.routes.create_task_pg", new=AsyncMock()):
         resp = client_with_queue.post(
             "/api/v1/classify/batch-async",
             json={"items": [{"text": "a"}, {"text": "b"}, {"text": "c"}]},
         )
     task_id = resp.json()["task_id"]
-    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=mock_result)):
         get_resp = client_with_queue.get(f"/api/v1/tasks/{task_id}")
     assert get_resp.status_code == 200
     data = get_resp.json()
@@ -219,11 +219,11 @@ def test_classify_batch_empty_list(client):
 
 def test_classify_batch_too_large(client_with_queue):
     """POST /classify/batch-async с превышением лимита — 400."""
-    large_items = [{"text": f"текст {i}"} for i in range(1001)]
+    large_items = [{"text": f"текст {i}"} for i in range(3001)]
     with patch("app.api.routes.settings") as m:
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
-        m.max_batch_size = 1000
+        m.max_batch_size = 3000
         response = client_with_queue.post(
             "/api/v1/classify/batch-async",
             json={"items": large_items},
@@ -294,7 +294,7 @@ def test_classify_missing_text_field(client):
 
 def test_get_task_404(client):
     """GET /tasks/{task_id} для несуществующего id — 404."""
-    with patch("app.api.routes.get_task_pg", return_value=None):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=None)):
         response = client.get("/api/v1/tasks/00000000-0000-0000-0000-000000000000")
     assert response.status_code == 404
 

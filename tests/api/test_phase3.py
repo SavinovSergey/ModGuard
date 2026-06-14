@@ -1,5 +1,5 @@
 """Тесты Фазы 3: поля is_spam/spam_score в ответе GET /tasks (и в ClassificationService)."""
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -44,8 +44,8 @@ def test_classify_response_has_spam_fields(client_phase3: TestClient):
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
         m.max_batch_size = 1000
-        with patch("app.api.routes.create_task_pg"):
-            with patch("app.api.routes.publish_task_request"):
+        with patch("app.api.routes.create_task_pg", new=AsyncMock()):
+            with patch("app.api.routes.publish_task_request", new=AsyncMock()):
                 resp = client_phase3.post(
                     "/api/v1/classify",
                     json={"text": "нормальный комментарий"},
@@ -53,7 +53,7 @@ def test_classify_response_has_spam_fields(client_phase3: TestClient):
     assert resp.status_code == 200
     task_id = resp.json()["task_id"]
 
-    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=mock_result)):
         response = client_phase3.get(f"/api/v1/tasks/{task_id}")
     assert response.status_code == 200
     data = response.json()
@@ -81,8 +81,8 @@ def test_classify_batch_response_has_spam_fields(client_phase3: TestClient):
         m.rabbitmq_url = "amqp://x"
         m.database_url = "postgres://x"
         m.max_batch_size = 1000
-        with patch("app.api.routes.create_task_pg"):
-            with patch("app.api.routes.publish_task_request"):
+        with patch("app.api.routes.create_task_pg", new=AsyncMock()):
+            with patch("app.api.routes.publish_task_request", new=AsyncMock()):
                 resp = client_phase3.post(
                     "/api/v1/classify/batch-async",
                     json={"items": [{"text": "текст один"}, {"text": "ебать второй"}]},
@@ -90,7 +90,7 @@ def test_classify_batch_response_has_spam_fields(client_phase3: TestClient):
     assert resp.status_code == 200
     task_id = resp.json()["task_id"]
 
-    with patch("app.api.routes.get_task_pg", return_value=mock_result):
+    with patch("app.api.routes.get_task_pg", new=AsyncMock(return_value=mock_result)):
         response = client_phase3.get(f"/api/v1/tasks/{task_id}")
     assert response.status_code == 200
     data = response.json()

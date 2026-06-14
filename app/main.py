@@ -10,8 +10,9 @@ from fastapi.responses import RedirectResponse
 
 from app.core.config import settings
 from app.core.task_store import TaskStore
-from app.core.cache import ModerationCache, NoOpModerationCache
-from app.core.db import init_db
+from app.core.cache import NoOpModerationCache, create_async_moderation_cache
+from app.core.db import init_db, init_pool, close_pool
+from app.core.queue_async import init_queue_publisher, close_queue_publisher
 from app.api.routes import router
 
 logging.basicConfig(
@@ -20,6 +21,7 @@ logging.basicConfig(
 )
 logging.getLogger("pika").setLevel(logging.WARNING)
 logging.getLogger("pika.adapters").setLevel(logging.WARNING)
+logging.getLogger("aio_pika").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 task_store: TaskStore = None
@@ -34,37 +36,43 @@ async def lifespan(app: FastAPI):
     logger.info("Starting ModGuard API (queue + task_id only)...")
 
     if settings.redis_url:
-        try:
-            import redis
-            _redis_client = redis.from_url(settings.redis_url, decode_responses=True)
-            _redis_client.ping()
-            task_store = TaskStore(_redis_client)
-            app.state.moderation_cache = ModerationCache(_redis_client)
-            logger.info("Redis connected, task_store and moderation_cache enabled")
-        except Exception as e:
-            logger.warning("Redis connection failed: %s, using in-memory fallback", e)
-            _redis_client = None
-            task_store = TaskStore(None)
-            app.state.moderation_cache = NoOpModerationCache()
+        app.state.moderation_cache = await create_async_moderation_cache(settings.redis_url)
+        _redis_client = app.state.moderation_cache._redis
+        task_store = TaskStore(_redis_client) if _redis_client is not None else TaskStore(None)
+        if _redis_client is not None:
+            logger.info("Redis async connected, task_store and moderation_cache enabled")
+        else:
+            logger.warning("Redis unavailable, using in-memory fallback")
     else:
         _redis_client = None
         task_store = TaskStore(None)
         app.state.moderation_cache = NoOpModerationCache()
 
-    if settings.database_url and not init_db():
-        raise RuntimeError(
-            "Не удалось инициализировать Postgres (БД и/или таблицы). "
-            "Проверьте DATABASE_URL, что сервер запущен, и права пользователя "
-            "(для автосоздания БД — CREATEDB). Либо выполните: python scripts/run/init_postgres.py"
-        )
+    if settings.database_url:
+        if not init_db():
+            raise RuntimeError(
+                "Не удалось инициализировать Postgres (БД и/или таблицы). "
+                "Проверьте DATABASE_URL, что сервер запущен, и права пользователя "
+                "(для автосоздания БД — CREATEDB). Либо выполните: python scripts/run/init_postgres.py"
+            )
+        if not await init_pool():
+            raise RuntimeError("Не удалось создать пул соединений Postgres (asyncpg).")
+
+    if settings.rabbitmq_url:
+        if not await init_queue_publisher():
+            raise RuntimeError(
+                "Не удалось подключиться к RabbitMQ. Проверьте RABBITMQ_URL."
+            )
 
     logger.info("API started (submit to queue, GET /tasks/{task_id} for result)")
     yield
 
     logger.info("Shutting down ModGuard API...")
+    await close_queue_publisher()
+    await close_pool()
     if _redis_client:
         try:
-            _redis_client.close()
+            await _redis_client.aclose()
         except Exception:
             pass
 

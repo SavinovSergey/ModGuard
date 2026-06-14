@@ -42,7 +42,7 @@ def create_cache(redis_url: str | None):
 def process_updates(updates: list, offset: int, cache, token: str, database_url: str | None) -> int:
     """Обрабатывает пакет апдейтов: кэш, создание задачи, публикация в очередь. Возвращает новый offset."""
     import uuid
-    from app.core.db import create_task_pg, set_task_result_pg
+    from app.core.db import create_task_pg, set_task_result_pg, run_db
     from app.core.queue import publish_task_request, publish_task_result
 
     source = "telegram"
@@ -65,15 +65,15 @@ def process_updates(updates: list, offset: int, cache, token: str, database_url:
         cached = cache.get_cached_result(text) if cache else None
         if cached is not None:
             if database_url:
-                create_task_pg(task_id, items, source=source, user_id=user_id)
-                set_task_result_pg(task_id, [cached], status="completed", from_cache=True)
+                run_db(create_task_pg(task_id, items, source=source, user_id=user_id))
+                run_db(set_task_result_pg(task_id, [cached], status="completed", from_cache=True))
             # Передаём ref в результат, чтобы actions-telegram мог удалить сообщение при необходимости
             result_with_ref = {**cached, "ref": ref}
             publish_task_result(task_id, source, [result_with_ref])
             logger.debug("Task %s from cache", task_id)
         else:
             if database_url:
-                create_task_pg(task_id, items, source=source, user_id=user_id)
+                run_db(create_task_pg(task_id, items, source=source, user_id=user_id))
             publish_task_request(
                 task_id,
                 [{"text": text, "ref": ref}],
@@ -121,7 +121,7 @@ def run_listener_loop(token: str, cache, database_url: str | None) -> None:
 
 def main():
     from app.core.config import settings
-    from app.core.db import init_db
+    from app.core.db import init_db, init_pool, run_db
 
     token = settings.telegram_bot_token
     if not token:
@@ -138,6 +138,8 @@ def main():
             "Postgres init failed. Fix DATABASE_URL or run: python scripts/run/init_postgres.py"
         )
         sys.exit(1)
+    if settings.database_url:
+        run_db(init_pool())
 
     run_listener_loop(token, cache, settings.database_url)
 

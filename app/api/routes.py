@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.task_store import TaskStore
 from app.core.cache import ModerationCache, NoOpModerationCache
 from app.core.db import create_task_pg, get_task_pg, set_task_result_pg
-from app.core.queue import publish_task_request, publish_task_result
+from app.core.queue_async import publish_task_request, publish_task_result
 from app import __version__
 
 logger = logging.getLogger(__name__)
@@ -47,15 +47,26 @@ def _require_queue():
         )
 
 
-def _get_cached_safe(cache, text: str):
-    """Возвращает результат из кэша или None. При ошибке Redis — None (не нагружаем очередь лишними вызовами)."""
+async def _aget_cached_safe(cache, text: str):
+    """Async: один GET из кэша."""
     if not text or not cache:
         return None
     try:
-        return cache.get_cached_result(text)
+        return await cache.aget_cached_result(text)
     except Exception as e:
         logger.warning("Cache get failed: %s", e)
         return None
+
+
+async def _aget_cached_batch_safe(cache, texts: List[str]) -> List[Optional[dict]]:
+    """Async: MGET — один roundtrip на батч."""
+    if not texts or not cache:
+        return [None] * len(texts)
+    try:
+        return await cache.aget_cached_results_batch(texts)
+    except Exception as e:
+        logger.warning("Cache batch get failed: %s", e)
+        return [None] * len(texts)
 
 
 @router.post("/classify", response_model=ClassifySubmitResponse, tags=["classification"])
@@ -71,15 +82,15 @@ async def classify(request: ClassifyRequest, request_ctx: Request):
     items_payload = [{"id": "0", "text": request.text}]
     source = "web"
 
-    cached = _get_cached_safe(cache, request.text)
+    cached = await _aget_cached_safe(cache, request.text)
     if cached is not None:
-        create_task_pg(task_id, items_payload, source=source)
-        set_task_result_pg(task_id, [cached], status="completed", from_cache=True)
-        publish_task_result(task_id, source, [{"ref": {}, **cached}])
+        await create_task_pg(task_id, items_payload, source=source)
+        await set_task_result_pg(task_id, [cached], status="completed", from_cache=True)
+        await publish_task_result(task_id, source, [{"ref": {}, **cached}])
         return ClassifySubmitResponse(task_id=task_id)
 
-    create_task_pg(task_id, items_payload, source=source)
-    publish_task_request(
+    await create_task_pg(task_id, items_payload, source=source)
+    await publish_task_request(
         task_id,
         [{"text": request.text, "ref": {}}],
         source=source,
@@ -108,11 +119,13 @@ async def classify_batch_async(request: BatchAsyncRequest, request_ctx: Request)
     source = request.source or "web"
 
     items_payload = [{"id": item.id or str(i), "text": item.text} for i, item in enumerate(request.items)]
-    cached_results = []  # (index, result)
+    cache_hits = await _aget_cached_batch_safe(cache, [item.text for item in request.items])
+
+    cached_results = []  # (index, result, ref)
     miss_items = []  # (index, item with ref)
     for i, item in enumerate(request.items):
         ref = getattr(item, "ref", None) or {}
-        c = _get_cached_safe(cache, item.text)
+        c = cache_hits[i]
         if c is not None:
             cached_results.append((i, c, ref))
         else:
@@ -122,22 +135,20 @@ async def classify_batch_async(request: BatchAsyncRequest, request_ctx: Request)
     n_miss = len(miss_items)
 
     if n_cached == len(request.items):
-        # Все в кэше — в БД и в очередь результатов, в очередь запросов не публикуем
         task_id = str(uuid.uuid4())
         by_index = {i: (c, ref) for i, c, ref in cached_results}
         results_for_db = [by_index[i][0] for i in range(len(request.items))]
         out = [{"ref": by_index[i][1], **by_index[i][0]} for i in range(len(request.items))]
-        create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
-        set_task_result_pg(task_id, results_for_db, status="completed", from_cache=True)
-        publish_task_result(task_id, source, out)
+        await create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
+        await set_task_result_pg(task_id, results_for_db, status="completed", from_cache=True)
+        await publish_task_result(task_id, source, out)
         return BatchAsyncResponse(task_id=task_id)
 
     if n_miss == len(request.items):
-        # Ничего в кэше — как раньше
         task_id = str(uuid.uuid4())
         items_for_queue = [{"text": item.text, "ref": {}} for item in request.items]
-        create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
-        publish_task_request(
+        await create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
+        await publish_task_request(
             task_id,
             items_for_queue,
             source=request.source,
@@ -145,20 +156,19 @@ async def classify_batch_async(request: BatchAsyncRequest, request_ctx: Request)
         )
         return BatchAsyncResponse(task_id=task_id)
 
-    # Частичный кэш: кэш-часть — свой task_id, в очередь результатов; остальное — свой task_id, в очередь запросов
     task_id_cached = str(uuid.uuid4())
     task_id_miss = str(uuid.uuid4())
     payload_cached = [items_payload[i] for i, _, _ in cached_results]
     payload_miss = [items_payload[i] for i, _ in miss_items]
     results_cached = [c for _, c, _ in cached_results]
-    create_task_pg(task_id_cached, payload_cached, source=source, user_id=request.user_id)
-    set_task_result_pg(task_id_cached, results_cached, status="completed", from_cache=True)
+    await create_task_pg(task_id_cached, payload_cached, source=source, user_id=request.user_id)
+    await set_task_result_pg(task_id_cached, results_cached, status="completed", from_cache=True)
     out_cached = [{"ref": ref, **c} for _, c, ref in cached_results]
-    publish_task_result(task_id_cached, source, out_cached)
+    await publish_task_result(task_id_cached, source, out_cached)
 
     items_miss_for_queue = [{"text": m["text"], "ref": m["ref"]} for _, m in miss_items]
-    create_task_pg(task_id_miss, payload_miss, source=source, user_id=request.user_id)
-    publish_task_request(
+    await create_task_pg(task_id_miss, payload_miss, source=source, user_id=request.user_id)
+    await publish_task_request(
         task_id_miss,
         items_miss_for_queue,
         source=request.source,
@@ -176,9 +186,9 @@ async def get_task_status(task_id: str, task_store: TaskStore = Depends(get_task
     """Получить статус и результат по task_id (polling). Читает из Postgres, иначе Redis/in-memory."""
     data = None
     if settings.database_url:
-        data = get_task_pg(task_id)
+        data = await get_task_pg(task_id)
     if data is None:
-        data = task_store.get_task(task_id)
+        data = await task_store.aget_task(task_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Task not found or expired")
     results_raw = data.get("results")
