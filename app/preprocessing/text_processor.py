@@ -37,6 +37,16 @@ except LookupError:
     nltk.download('stopwords', quiet=True)
     stop_words = set(stopwords.words('russian'))
 
+# Предкомпилированные шаблоны normalize() — один раз при импорте модуля
+_RE_URLS_EMAIL = re.compile(
+    r"(http|www)\S+|[a-z\d\._-]+@[a-z\d\._-]+\.[a-z\d\._-]+|@[a-z]+"
+)
+_RE_HTML_TAGS = re.compile(r"<.*?>")
+_RE_VK_MENTION = re.compile(r"\[id\d+|.+\], ")
+_RE_HTML_ENTITIES = re.compile(r"&#\d+;|&.+;")
+_RE_PUNCTUATION = re.compile(r'[!\"#$%&\'\(\)*+,-./:;<=>?@\[\\\]^_`\{\|\}~]')
+_RE_MULTI_SPACE = re.compile(r"\s{2,}")
+
 
 @lru_cache(maxsize=100000)
 def _lemmatize_word(word: str) -> str:
@@ -105,25 +115,17 @@ class TextProcessor:
         """
         # Приведение к нижнему регистру
         text = text.lower()
-        
-        # Удаление ссылок на сайты, почты и аккаунты
-        text = re.sub(r"(http|www)\S+|[a-z\d\._-]+@[a-z\d\._-]+\.[a-z\d\._-]+|@[a-z]+", " ", text)
-        
-        # HTML тэги
-        text = re.sub(r"<.*?>", " ", text)
-        
-        # Удаление отметок вида [id647188941|зара]
-        text = re.sub(r"\[id\d+|.+\], ", "", text)
-        
-        # Удаление сочетаний вида &#33;
-        text = re.sub(r'&#\d+;|&.+;', ' ', text)
-        
+
+        text = _RE_URLS_EMAIL.sub(" ", text)
+        text = _RE_HTML_TAGS.sub(" ", text)
+        text = _RE_VK_MENTION.sub("", text)
+        text = _RE_HTML_ENTITIES.sub(" ", text)
+
         if self.remove_punkt:
-            text = re.sub(r'[!\"#$%&\'\(\)*+,-./:;<=>?@\[\\\]^_`\{\|\}~]', ' ', text)
-        
-        # Удаление множественных пробелов
-        text = re.sub(r'\s{2,}', ' ', text)
-        
+            text = _RE_PUNCTUATION.sub(" ", text)
+
+        text = _RE_MULTI_SPACE.sub(" ", text)
+
         return text.strip()
     
     def lemmatize(self, text: str) -> str:
@@ -136,13 +138,30 @@ class TextProcessor:
         Returns:
             Лемматизированный текст
         """
-        words = text.split()
-        lemmatized = [_lemmatize_word(w) for w in words]
-        result = ' '.join(lemmatized)
-        # Замена ё на е
-        result = result.replace('ё', 'е')
-        result = result.replace('ъ', 'ь')
-        return result
+        return self._apply_lemma_postprocess(
+            ' '.join(_lemmatize_word(w) for w in text.split())
+        )
+
+    @staticmethod
+    def _apply_lemma_postprocess(text: str) -> str:
+        return text.replace('ё', 'е').replace('ъ', 'ь')
+
+    def _lemmatize_texts(self, texts: List[str]) -> List[str]:
+        """Лемматизация батча: pymorphy вызывается только для уникальных токенов."""
+        unique_words: set[str] = set()
+        for text in texts:
+            if text:
+                unique_words.update(text.split())
+
+        lemma_by_word = {
+            word: self._apply_lemma_postprocess(_lemmatize_word(word))
+            for word in unique_words
+        }
+
+        return [
+            ' '.join(lemma_by_word[word] for word in text.split()) if text else ""
+            for text in texts
+        ]
     
     def remove_stop_words(self, text: str) -> str:
         """
@@ -168,5 +187,30 @@ class TextProcessor:
         Returns:
             Список предобработанных текстов
         """
-        return [self.process(text) for text in texts]
+        if not texts:
+            return []
+
+        results: List[str] = [""] * len(texts)
+        active_indices: List[int] = []
+        normalized: List[str] = []
+
+        for index, text in enumerate(texts):
+            if text is None or not isinstance(text, str) or not text.strip():
+                continue
+            active_indices.append(index)
+            normalized.append(self.normalize(text))
+
+        if not active_indices:
+            return results
+
+        if self.use_lemmatization:
+            normalized = self._lemmatize_texts(normalized)
+
+        if self.remove_stopwords:
+            normalized = [self.remove_stop_words(text) for text in normalized]
+
+        for index, processed in zip(active_indices, normalized):
+            results[index] = processed.strip()
+
+        return results
 

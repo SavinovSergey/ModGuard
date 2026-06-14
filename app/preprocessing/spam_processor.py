@@ -2,6 +2,12 @@
 import re
 from typing import List, Tuple
 
+# Предкомпилированные шаблоны process() — один раз при импорте модуля
+_RE_HTML_TAGS = re.compile(r"<[^>]+>")
+_RE_VK_MENTION = re.compile(r"\[id\d+\|[^\]]*\],?\s*")
+_RE_HTML_ENTITIES = re.compile(r"&#\d+;|&[a-z]+;")
+_RE_MULTI_SPACE = re.compile(r"\s{2,}")
+
 
 # Базовый список русских стоп-слов для TF-IDF (эвристики считаются по сырому тексту)
 RUSSIAN_STOPWORDS = {
@@ -107,13 +113,10 @@ class SpamTextProcessor:
             return ""
 
         # s = s.lower()     # капс - сильный сигнал для спама
-        # Удаляем только HTML-теги
-        s = re.sub(r"<[^>]+>", " ", s)
-        # Удаляем отметки вида [id123|name]
-        s = re.sub(r"\[id\d+\|[^\]]*\],?\s*", "", s)
-        s = re.sub(r"&#\d+;|&[a-z]+;", " ", s)
-        # Убираем лишние пробелы (цифры, email, URL оставляем)
-        s = re.sub(r"\s{2,}", " ", s)
+        s = _RE_HTML_TAGS.sub(" ", s)
+        s = _RE_VK_MENTION.sub("", s)
+        s = _RE_HTML_ENTITIES.sub(" ", s)
+        s = _RE_MULTI_SPACE.sub(" ", s)
 
         # Удаляем русские стоп-слова только для TF-IDF (эвристики считаются по сырому тексту)
         tokens = s.split()
