@@ -1,18 +1,23 @@
 {
   "best_params": {
-    "max_features": 120000,
+    "max_features": 45000,
     "min_ngram": 3,
-    "max_ngram": 6,
+    "max_ngram": 4,
     "use_idf": true,
     "norm": "l2",
-    "min_df": 8,
-    "max_df": 0.6316570062766683,
+    "min_df": 30,
+    "max_df": 0.22570698065637917,
     "sublinear_tf": true,
-    "C": 5.022242708407757
+    "C": 4.3963886344539205
   },
-  "best_score": 0.9720797051848395,
+  "best_score": 0.9689175542461522,
   "best_score_metric": "average_precision",
-  "optimal_threshold": 0.6117709633110597,
+  "optimal_threshold": 0.6156657342857693,
   "n_folds": 5,
-  "random_state": 42
+  "random_state": 42,
+  "preprocessing": {
+    "use_lemmatization": false,
+    "remove_stopwords": true,
+    "remove_punkt": true
+  }
 }
