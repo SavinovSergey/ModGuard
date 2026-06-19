@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import math
 import random
+import statistics
 import sys
 import os
 import time
@@ -43,6 +44,8 @@ os.chdir(_root)
 
 import requests
 from tqdm import tqdm
+
+from scripts.run import bench_results
 
 
 # ---------------------------------------------------------------------------
@@ -413,20 +416,26 @@ def collect_prepared_batches(
     batch_window_sec: float,
     align_cache: Any,
 ) -> list[dict[str, Any]]:
-    """Собирает батчи по симулированной временной шкале (без HTTP)."""
+    """Группирует события прибытия в батчи (без HTTP и без сна).
+
+    Каждый батч получает item_arrivals (план прибытия каждого item, сек от старта
+    шкалы) и scheduled_send (когда батч готов уйти = время закрывающего события).
+    Реальная отправка по расписанию делается в open-loop sender.
+    """
     prepared: list[dict[str, Any]] = []
-    batch: list[tuple[str, int, bool]] = []
+    batch: list[tuple[str, int, bool, float]] = []
     batch_first: float | None = None
-    start_wall = time.perf_counter()
 
     def _flush() -> None:
         nonlocal batch, batch_first
         if not batch:
             return
-        has_dup = any(d for _, _, d in batch)
-        items_text = [t for t, _, _ in batch]
-        indices = [i for _, i, _ in batch]
-        items_pairs = [(t, i) for t, i, _ in batch]
+        has_dup = any(d for _, _, d, _ in batch)
+        items_text = [t for t, _, _, _ in batch]
+        indices = [i for _, i, _, _ in batch]
+        items_pairs = [(t, i) for t, i, _, _ in batch]
+        item_arrivals = [ev for _, _, _, ev in batch]
+        scheduled_send = max(item_arrivals) if item_arrivals else 0.0
         cache_hits = (
             [align_cache.get_cached_result(t) is not None for t in items_text]
             if align_cache
@@ -438,6 +447,8 @@ def collect_prepared_batches(
                 "items_pairs": items_pairs,
                 "indices": indices,
                 "items": items_text,
+                "item_arrivals": item_arrivals,
+                "scheduled_send": scheduled_send,
                 "cache_hits": cache_hits,
                 "has_dup": has_dup,
             }
@@ -446,10 +457,7 @@ def collect_prepared_batches(
         batch_first = None
 
     for ev_time, idx, is_dup in events:
-        elapsed = time.perf_counter() - start_wall
-        if ev_time > elapsed:
-            time.sleep(ev_time - elapsed)
-        batch.append((texts[idx], idx, is_dup))
+        batch.append((texts[idx], idx, is_dup, ev_time))
         if batch_first is None:
             batch_first = ev_time
         if len(batch) >= batch_size or (ev_time - batch_first) >= batch_window_sec:
@@ -479,8 +487,18 @@ async def send_prepared_batches_async(
     prepared_batches: list[dict[str, Any]],
     send_workers: int,
     send_timeout: float,
-) -> tuple[list[dict[str, Any]], float]:
-    """Параллельная отправка батчей через asyncio.TaskGroup (+ опциональный Semaphore)."""
+    open_loop: bool = False,
+) -> tuple[list[dict[str, Any]], float, float]:
+    """Отправка батчей через asyncio.TaskGroup (+ опциональный Semaphore).
+
+    open_loop=True: каждый батч уходит в свой scheduled_send (сек от старта),
+    независимо от завершения других — честная open-loop нагрузка с фиксированным
+    темпом прибытия. Ожидание расписания делается ДО захвата семафора, чтобы
+    ждущие батчи не держали слот отправки.
+
+    Возвращает (send_results, send_wall, send_start_epoch). send_start_epoch —
+    Unix-время момента старта отправки (якорь для пересчёта плана прибытия в latency).
+    """
     limits = httpx.Limits(
         max_connections=send_workers if send_workers > 0 else max(32, len(prepared_batches)),
         max_keepalive_connections=send_workers if send_workers > 0 else 32,
@@ -488,12 +506,17 @@ async def send_prepared_batches_async(
     timeout = httpx.Timeout(send_timeout, connect=10.0)
     sem = asyncio.Semaphore(send_workers) if send_workers > 0 else None
 
+    send_start_epoch = time.time()
     send_wall_start = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         pbar = tqdm(total=len(prepared_batches), desc="Отправка батчей", unit="batch")
 
         async def _limited_send(prep: dict[str, Any]) -> dict[str, Any]:
             try:
+                if open_loop:
+                    delay = prep.get("scheduled_send", 0.0) - (time.perf_counter() - send_wall_start)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                 if sem is not None:
                     async with sem:
                         return await _send_prepared_batch(client, api_url, prep)
@@ -508,7 +531,7 @@ async def send_prepared_batches_async(
         send_results = [t.result() for t in send_tasks]
         pbar.close()
     send_wall = time.perf_counter() - send_wall_start
-    return send_results, send_wall
+    return send_results, send_wall, send_start_epoch
 
 
 async def run_chain_http_async(
@@ -519,10 +542,11 @@ async def run_chain_http_async(
     poll_interval: float,
     timeout: float,
     fetch_quality: bool,
+    open_loop: bool = False,
 ) -> dict[str, Any]:
     """Отправка, polling и (опционально) загрузка результатов — один async-контур."""
-    send_results, send_wall = await send_prepared_batches_async(
-        api_url, prepared_batches, send_workers, send_timeout
+    send_results, send_wall, send_start_epoch = await send_prepared_batches_async(
+        api_url, prepared_batches, send_workers, send_timeout, open_loop=open_loop
     )
 
     submitted: list[dict[str, Any]] = []
@@ -542,6 +566,8 @@ async def run_chain_http_async(
                     "task_ids": list(tids),
                     "indices": prep["indices"],
                     "items": prep["items"],
+                    "item_arrivals": prep.get("item_arrivals", [0.0] * prep["n_items"]),
+                    "scheduled_send": prep.get("scheduled_send", 0.0),
                     "cache_hits": prep["cache_hits"],
                     "has_dup": prep["has_dup"],
                 }
@@ -591,6 +617,7 @@ async def run_chain_http_async(
         "batch_send_times": batch_send_times,
         "batch_send_hot": batch_send_hot,
         "send_wall": send_wall,
+        "send_start_epoch": send_start_epoch,
         "summary": summary,
         "results_by_tid": results_by_tid,
     }
@@ -603,6 +630,145 @@ async def run_chain_http_async(
 def _pg_available() -> bool:
     from app.core.config import settings
     return bool(settings.database_url)
+
+
+def pg_clock_offset() -> float | None:
+    """Смещение часов: NOW() Postgres минус локальное время клиента (сек).
+
+    pg_epoch = client_epoch + offset. Меряется один раз; round-trip к БД мал,
+    для e2e в сотни мс погрешность пренебрежима.
+    """
+    if not _pg_available():
+        return None
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                t_before = time.time()
+                cur.execute("SELECT EXTRACT(EPOCH FROM NOW())")
+                pg_epoch = float(cur.fetchone()[0])
+                t_after = time.time()
+        client_mid = (t_before + t_after) / 2.0
+        return pg_epoch - client_mid
+    except Exception as e:
+        print(f"  [PG] clock offset: {e}")
+        return None
+
+
+def pg_tasks_completed_epoch(task_ids: list[str]) -> dict[str, tuple[float, float]] | None:
+    """task_id -> (created_epoch, completed_epoch) в Unix-времени Postgres."""
+    if not _pg_available() or not task_ids:
+        return None
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT task_id,
+                           EXTRACT(EPOCH FROM created_at),
+                           EXTRACT(EPOCH FROM completed_at)
+                    FROM tasks
+                    WHERE task_id = ANY(%s)
+                      AND created_at IS NOT NULL AND completed_at IS NOT NULL
+                    """,
+                    (task_ids,),
+                )
+                return {str(tid): (float(ca), float(cpa)) for tid, ca, cpa in cur.fetchall()}
+    except Exception as e:
+        print(f"  [PG] completed epoch: {e}")
+        return None
+
+
+def pg_throughput_steady_state(
+    task_ids: list[str],
+    trim: float = 0.1,
+) -> dict[str, float | int] | None:
+    """Throughput на установившемся плато: окно [t0+trim*span, t1-trim*span].
+
+    Items задачи относим к моменту её completed_at; считаем items, попавшие в окно,
+    делим на длительность окна. Отбрасывает разгон и затухание.
+    """
+    if not _pg_available() or not task_ids:
+        return None
+    if trim < 0 or trim >= 0.5:
+        trim = 0.1
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXTRACT(EPOCH FROM t.created_at),
+                           EXTRACT(EPOCH FROM t.completed_at),
+                           COUNT(ti.item_index)
+                    FROM tasks t
+                    INNER JOIN task_items ti ON ti.task_id = t.task_id
+                    WHERE t.task_id = ANY(%s)
+                      AND t.created_at IS NOT NULL AND t.completed_at IS NOT NULL
+                    GROUP BY t.task_id, t.created_at, t.completed_at
+                    """,
+                    (task_ids,),
+                )
+                rows = [(float(ca), float(cpa), int(n)) for ca, cpa, n in cur.fetchall()]
+        if not rows:
+            return None
+        t0 = min(r[0] for r in rows)
+        t1 = max(r[1] for r in rows)
+        span = t1 - t0
+        if span <= 0:
+            return None
+        lo = t0 + trim * span
+        hi = t1 - trim * span
+        window = hi - lo
+        if window <= 0:
+            return None
+        n_window = sum(n for _, cpa, n in rows if lo <= cpa <= hi)
+        if n_window <= 0:
+            return None
+        return {
+            "n_items": int(n_window),
+            "span_sec": float(window),
+            "throughput": float(n_window) / window,
+            "trim": float(trim),
+        }
+    except Exception as e:
+        print(f"  [PG] steady throughput: {e}")
+        return None
+
+
+def pg_model_distribution(task_ids: list[str]) -> tuple[str | None, str | None] | None:
+    """Доминирующие tox_model_used / spam_model_used по task_items (для метаданных прогона)."""
+    if not _pg_available() or not task_ids:
+        return None
+    from app.core.db import get_db_connection
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tox_model_used, spam_model_used, COUNT(*)
+                    FROM task_items WHERE task_id = ANY(%s)
+                    GROUP BY tox_model_used, spam_model_used
+                    """,
+                    (task_ids,),
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return None
+        tox_counts: dict[str, int] = {}
+        spam_counts: dict[str, int] = {}
+        for tox, spam, c in rows:
+            if tox:
+                tox_counts[tox] = tox_counts.get(tox, 0) + int(c)
+            if spam:
+                spam_counts[spam] = spam_counts.get(spam, 0) + int(c)
+        dom_tox = max(tox_counts, key=tox_counts.get) if tox_counts else None
+        dom_spam = max(spam_counts, key=spam_counts.get) if spam_counts else None
+        return (dom_tox, dom_spam)
+    except Exception as e:
+        print(f"  [PG] model distribution: {e}")
+        return None
 
 
 def pg_tasks_e2e_seconds(task_ids: list[str]) -> dict[str, float] | None:
@@ -768,11 +934,17 @@ def _run_single_latency(
     poll_interval: float,
     timeout: float,
     title: str,
-) -> list[float]:
-    """Замеряет latency для одного сообщения через POST /classify и GET /tasks/{task_id}."""
+) -> tuple[list[float], list[str]]:
+    """Latency одного сообщения: POST /classify, polling до готовности.
+
+    Возвращает (client_latencies, completed_task_ids). Клиентская latency содержит
+    квантование poll_interval; серверная (без квантования) считается отдельно из PG
+    по completed_task_ids.
+    """
     classify_url = f"{api_url.rstrip('/')}/api/v1/classify"
     task_url = f"{api_url.rstrip('/')}/api/v1/tasks"
     latencies: list[float] = []
+    completed_task_ids: list[str] = []
     errors = 0
     poll_sleeps_per_msg: list[int] = []
     get_count_per_msg: list[int] = []
@@ -798,6 +970,7 @@ def _run_single_latency(
                     st = pr.json().get("status")
                     if st == "completed":
                         latencies.append(time.perf_counter() - t0)
+                        completed_task_ids.append(str(task_id))
                         poll_sleeps_per_msg.append(n_sleeps)
                         get_count_per_msg.append(n_gets)
                         break
@@ -813,7 +986,7 @@ def _run_single_latency(
 
     if not latencies:
         print(f"  Нет успешных замеров. Ошибок: {errors}")
-        return latencies
+        return latencies, completed_task_ids
 
     pcts = percentiles(latencies)
     avg = sum(latencies) / len(latencies)
@@ -821,7 +994,7 @@ def _run_single_latency(
     avg_sleeps = sum(poll_sleeps_per_msg) / len(poll_sleeps_per_msg)
     avg_gets = sum(get_count_per_msg) / len(get_count_per_msg)
     print(f"  Успешно: {len(latencies)}/{len(sample)}, ошибок: {errors}")
-    print(f"  Avg: {avg * 1000:.0f}ms  {_fmt_pcts(pcts)}")
+    print(f"  Avg (client, с poll-квантованием): {avg * 1000:.0f}ms  {_fmt_pcts(pcts)}")
     print(f"  Min: {min(latencies) * 1000:.0f}ms, Max: {max(latencies) * 1000:.0f}ms")
     print(
         f"  Опрос: poll_interval={poll_interval * 1000:.0f}ms; "
@@ -829,30 +1002,54 @@ def _run_single_latency(
         f"(~{avg_sleeps * poll_interval * 1000:.0f}ms sleep суммарно), "
         f"{avg_gets:.2f} GET /tasks; за весь прогон sleep опроса ~{total_sleep * 1000:.0f}ms"
     )
-    return latencies
+
+    _print_single_server_latency(completed_task_ids, title)
+    return latencies, completed_task_ids
 
 
-def run_single_latency_test(api_url: str, texts: list[str], n: int, poll_interval: float, timeout: float, mode: str, dedup: bool) -> None:
+def _print_single_server_latency(task_ids: list[str], title: str) -> dict[str, float] | None:
+    """Серверная single-latency из PG (completed - created), без poll-квантования."""
+    epochs = pg_tasks_completed_epoch(task_ids)
+    if not epochs:
+        return None
+    server_lat = [cpa - ca for ca, cpa in epochs.values() if cpa - ca >= 0]
+    if not server_lat:
+        return None
+    pcts = percentiles(server_lat)
+    avg = sum(server_lat) / len(server_lat)
+    print(
+        f"  {title} server-side (PG, без квантования): n={len(server_lat)}, "
+        f"avg={avg * 1000:.0f}ms, {_fmt_pcts(pcts)}, "
+        f"min={min(server_lat) * 1000:.0f}ms, max={max(server_lat) * 1000:.0f}ms"
+    )
+    return {"avg": avg, **pcts, "n": len(server_lat)}
+
+
+def run_single_latency_test(
+    api_url: str, texts: list[str], n: int, poll_interval: float, timeout: float, mode: str, dedup: bool
+) -> dict[str, float] | None:
+    """Возвращает серверные перцентили single-latency (cold-прогон) для записи в результат."""
     source = _deduplicate_texts(texts) if dedup else list(texts)
     if dedup and len(source) < len(texts):
         print(f"\n[Single latency] Дедупликация: {len(texts)} → {len(source)}")
     sample = random.sample(source, min(n, len(source)))
 
     if mode == "single":
-        _run_single_latency(api_url, sample, poll_interval, timeout, "Single latency")
-        return
+        _, tids = _run_single_latency(api_url, sample, poll_interval, timeout, "Single latency")
+        return _print_single_server_latency(tids, "Single latency")
 
     from scripts.run.clear_redis import clear_rs
     clear_rs()
     print("[Single latency] Кэш очищен.")
 
-    cold = _run_single_latency(api_url, sample, poll_interval, timeout, "Cold-cache")
-    hot = _run_single_latency(api_url, sample, poll_interval, timeout, "Hot-cache")
+    cold, cold_tids = _run_single_latency(api_url, sample, poll_interval, timeout, "Cold-cache")
+    hot, _ = _run_single_latency(api_url, sample, poll_interval, timeout, "Hot-cache")
     if cold and hot:
         cold_avg = sum(cold) / len(cold)
         hot_avg = sum(hot) / len(hot)
         if hot_avg > 0:
             print(f"  Ускорение hot vs cold: x{cold_avg / hot_avg:.2f}")
+    return _print_single_server_latency(cold_tids, "Cold-cache")
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +1073,29 @@ def count_batches(events: list[tuple[float, int, bool]], batch_size: int, window
     return n
 
 
+def build_open_loop_events(
+    n: int,
+    target_rate: float,
+    arrival: str,
+    rng: random.Random,
+) -> list[tuple[float, int, bool]]:
+    """Расписание прибытия n сообщений с интенсивностью target_rate (msg/sec).
+
+    arrival=uniform — равномерные интервалы 1/rate; poisson — экспоненциальные
+    (пуассоновский поток). Open-loop: расписание фиксировано, не зависит от системы.
+    """
+    events: list[tuple[float, int, bool]] = []
+    t = 0.0
+    for i in range(n):
+        events.append((t, i, False))
+        if arrival == "poisson":
+            gap = rng.expovariate(target_rate)
+        else:
+            gap = 1.0 / target_rate
+        t += gap
+    return events
+
+
 def run(
     val_data: Path,
     max_samples: int | None,
@@ -896,7 +1116,16 @@ def run(
     spam_label_col: str | None = None,
     send_workers: int = 32,
     send_timeout: float = 120.0,
-) -> None:
+    target_rate: float = 0.0,
+    arrival: str = "uniform",
+    steady_trim: float = 0.1,
+    results_dir: str | None = "benchmarks/results",
+    run_tag: str = "",
+    note: str = "",
+    backend_replicas: int = 0,
+    pool_workers: int = 0,
+    prefetch: int = 0,
+) -> dict[str, Any] | None:
     if clear_cache:
         from scripts.run.clear_redis import clear_rs
         clear_rs()
@@ -907,40 +1136,51 @@ def run(
     n = len(texts)
     print(f"Загружено текстов: {n} (файл: {val_data})")
     if n == 0:
-        return
+        return None
 
     align_cache = _moderation_cache_for_alignment()
     if align_cache is None:
         print("  [metrics] REDIS_URL не задан или недоступен — при частичном кэше батч не попадёт в P/R/F1.")
 
+    open_loop = target_rate > 0
+    mode = "open-loop" if open_loop else "capacity"
+
     n_dup = max(0, int(n * duplicate_ratio))
     dup_indices = random.sample(range(n), min(n_dup, n)) if n_dup else []
 
-    events: list[tuple[float, int, bool]] = []
-    t = 0.0
-    for i in range(n):
-        events.append((t, i, False))
-        t += random.randint(delay_min_ms, delay_max_ms) / 1000.0
-    t_dup = t + max(0.0, duplicate_after_sec)
-    for idx in dup_indices:
-        events.append((t_dup, idx, True))
-        t_dup += random.randint(delay_min_ms, delay_max_ms) / 1000.0
-    events.sort(key=lambda x: x[0])
+    if open_loop:
+        # Управляемый темп прибытия (latency-under-load); дубликаты в этом режиме не добавляем.
+        events = build_open_loop_events(n, target_rate, arrival, random.Random())
+    else:
+        events = []
+        t = 0.0
+        for i in range(n):
+            events.append((t, i, False))
+            t += random.randint(delay_min_ms, delay_max_ms) / 1000.0
+        t_dup = t + max(0.0, duplicate_after_sec)
+        for idx in dup_indices:
+            events.append((t_dup, idx, True))
+            t_dup += random.randint(delay_min_ms, delay_max_ms) / 1000.0
+        events.sort(key=lambda x: x[0])
 
     n_batches = count_batches(events, batch_size, batch_window_sec)
+    print(f"Режим: {mode}" + (f", target_rate={target_rate:.0f} msg/sec ({arrival})" if open_loop else ""))
     print(f"batch_size={batch_size}, window={batch_window_sec}s, delay={delay_min_ms}-{delay_max_ms}ms")
-    print(f"Дубликаты: {len(dup_indices)} через {duplicate_after_sec}s")
+    if not open_loop:
+        print(f"Дубликаты: {len(dup_indices)} через {duplicate_after_sec}s")
     print(f"Ожидаемое число батчей: {n_batches}")
     print(f"HTTP: asyncio.TaskGroup, send_workers={send_workers or '∞'}")
 
     need_quality = any(t is not None for t in tox_labels) or any(s is not None for s in spam_labels)
 
-    print("Сбор батчей (симуляция задержек)...")
+    print("Сбор батчей...")
     prepared_batches = collect_prepared_batches(
         events, texts, batch_size, batch_window_sec, align_cache
     )
     if len(prepared_batches) != n_batches:
         print(f"  [warn] собрано батчей {len(prepared_batches)}, ожидалось {n_batches}")
+
+    clock_offset = pg_clock_offset()
 
     start_wall = time.perf_counter()
     chain = asyncio.run(
@@ -952,6 +1192,7 @@ def run(
             poll_interval=poll_interval,
             timeout=timeout,
             fetch_quality=need_quality,
+            open_loop=open_loop,
         )
     )
 
@@ -961,12 +1202,13 @@ def run(
     batch_send_times = chain["batch_send_times"]
     batch_send_hot = chain["batch_send_hot"]
     send_wall = chain["send_wall"]
+    send_start_epoch = chain["send_start_epoch"]
     summary = chain["summary"]
     results_by_tid = chain["results_by_tid"]
 
     if not all_task_ids:
         print("Нет task_id для опроса.")
-        return
+        return None
 
     completed = sum(1 for tid in unique_ids if summary["statuses"].get(tid) == "completed")
     failed = sum(1 for tid in unique_ids if summary["statuses"].get(tid) == "failed")
@@ -1043,6 +1285,9 @@ def run(
             tid_hot[str(tid)] = b["has_dup"]
     cold_e2e: list[float] = []
     hot_e2e: list[float] = []
+    all_e2e: list[float] = []
+    throughput_overall: float | None = None
+    throughput_steady: float | None = None
 
     if e2e_map is None:
         print("  Batch e2e (Postgres): пропуск (нет DATABASE_URL или ошибка запроса)")
@@ -1083,10 +1328,19 @@ def run(
         pg_tids_all = list(e2e_map.keys())
         pg_all = pg_throughput_for_tasks(pg_tids_all)
         if pg_all:
+            throughput_overall = float(pg_all["throughput"])
             print(
                 f"  Throughput (Postgres, все task_id): {pg_all['throughput']:.0f} msg/sec "
                 f"({pg_all['n_items']} items / {pg_all['span_sec']:.2f}s, "
                 f"min(created_at)→max(completed_at))"
+            )
+        pg_steady = pg_throughput_steady_state(pg_tids_all, steady_trim)
+        if pg_steady:
+            throughput_steady = float(pg_steady["throughput"])
+            print(
+                f"  Throughput (Postgres, плато, trim={pg_steady['trim']:.2f}): "
+                f"{pg_steady['throughput']:.0f} msg/sec "
+                f"({pg_steady['n_items']} items / {pg_steady['span_sec']:.2f}s)"
             )
         cold_tids = [
             tid for tid in unique_ids
@@ -1131,11 +1385,118 @@ def run(
         if items_total != submitted_total:
             print(f"  [PG] items в БД ({items_total}) ≠ отправлено ({submitted_total})")
 
+    # --- Intended latency (от запланированного прибытия; убирает coordinated omission) ---
+    intended: list[float] = []
+    completed_epoch_map = pg_tasks_completed_epoch(unique_ids)
+    if clock_offset is None:
+        print("  Intended latency: пропуск (нет смещения часов PG)")
+    elif not completed_epoch_map:
+        print("  Intended latency: пропуск (нет completed task в PG)")
+    else:
+        for block in submitted:
+            tids = block["task_ids"]
+            if len(tids) != 1:
+                continue  # частичный кэш (2 task_id) не разводим по item — пропуск
+            tid = str(tids[0])
+            if tid not in completed_epoch_map:
+                continue
+            completed_epoch = completed_epoch_map[tid][1]
+            for a in block.get("item_arrivals", []):
+                arrival_pg = send_start_epoch + a + clock_offset
+                lat = completed_epoch - arrival_pg
+                if lat >= 0:
+                    intended.append(lat)
+        if intended:
+            p_int = percentiles(intended, (50, 95, 99, 99.9))
+            avg_int = sum(intended) / len(intended)
+            print(
+                f"  Intended e2e latency (от прибытия): n={len(intended)}, "
+                f"avg={avg_int * 1000:.0f}ms, {_fmt_pcts(p_int)}, max={max(intended) * 1000:.0f}ms"
+            )
+
     # --- Single latency ---
+    single_server: dict[str, float] | None = None
     if single_latency_n > 0:
-        run_single_latency_test(api_url, texts, single_latency_n, poll_interval, timeout, single_latency_mode, single_latency_dedup)
+        single_server = run_single_latency_test(
+            api_url, texts, single_latency_n, poll_interval, timeout, single_latency_mode, single_latency_dedup
+        )
+
+    # --- Сбор и сохранение результата прогона ---
+    achieved = throughput_steady if throughput_steady is not None else throughput_overall
+    cache_hit_rate = None
+    if cache:
+        n_cache, n_total = cache
+        cache_hit_rate = (100.0 * n_cache / n_total) if n_total else 0.0
+    model_tox = model_spam = None
+    model_dist = pg_model_distribution(unique_ids)
+    if model_dist:
+        model_tox, model_spam = model_dist
+
+    def _pcts_ms(values: list[float]) -> dict[str, float]:
+        if not values:
+            return {}
+        d = percentiles(values, (50, 95, 99, 99.9))
+        return {
+            "p50": d.get("p50", 0.0) * 1000,
+            "p95": d.get("p95", 0.0) * 1000,
+            "p99": d.get("p99", 0.0) * 1000,
+            "p999": d.get("p99.9", 0.0) * 1000,
+            "max": max(values) * 1000,
+        }
+
+    e2e_ms = _pcts_ms(all_e2e)
+    int_ms = _pcts_ms(intended)
+    conditions = {
+        "mode": mode,
+        "target_rate": target_rate,
+        "arrival": arrival,
+        "api_url": api_url,
+        "val_data": str(val_data),
+        "batch_size": batch_size,
+        "batch_window": batch_window_sec,
+        "send_workers": send_workers,
+        "steady_trim": steady_trim,
+        "clear_cache": clear_cache,
+        "backend_replicas": backend_replicas or None,
+        "pool_workers": pool_workers or None,
+        "prefetch": prefetch or None,
+        "model_tox": model_tox,
+        "model_spam": model_spam,
+    }
+    metrics = {
+        "n_items": total_results,
+        "achieved_throughput": achieved,
+        "throughput_steady": throughput_steady,
+        "throughput_overall": throughput_overall,
+        "success_rate": (completed / len(unique_ids)) if unique_ids else None,
+        "cache_hit_rate": cache_hit_rate,
+        "e2e_p50": e2e_ms.get("p50"),
+        "e2e_p95": e2e_ms.get("p95"),
+        "e2e_p99": e2e_ms.get("p99"),
+        "e2e_p999": e2e_ms.get("p999"),
+        "e2e_max": e2e_ms.get("max"),
+        "intended_p50": int_ms.get("p50"),
+        "intended_p95": int_ms.get("p95"),
+        "intended_p99": int_ms.get("p99"),
+        "intended_p999": int_ms.get("p999"),
+        "intended_max": int_ms.get("max"),
+        "single_server_p50": (single_server or {}).get("p50", 0.0) * 1000 if single_server else None,
+        "single_server_p95": (single_server or {}).get("p95", 0.0) * 1000 if single_server else None,
+        "single_server_p99": (single_server or {}).get("p99", 0.0) * 1000 if single_server else None,
+    }
+    result = bench_results.RunResult(
+        conditions=conditions, metrics=metrics, run_tag=run_tag, note=note
+    )
+    if results_dir:
+        try:
+            paths = bench_results.save_run(result, results_dir)
+            print(f"\nРезультат сохранён: {paths['json']}")
+            print(f"  CSV-сводка: {paths['csv']}")
+        except Exception as e:
+            print(f"  [results] Не удалось сохранить: {e}")
 
     print("\nГотово.")
+    return result.to_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -1183,6 +1544,27 @@ def main():
         default=300.0,
         help="Таймаут одного POST batch-async (сек)",
     )
+    p.add_argument(
+        "--target-rate",
+        type=float,
+        default=0.0,
+        help="Open-loop: целевая интенсивность прибытия (msg/sec). 0 — capacity/дамп (как раньше)",
+    )
+    p.add_argument(
+        "--arrival",
+        type=str,
+        default="uniform",
+        choices=["uniform", "poisson"],
+        help="Распределение интервалов прибытия для open-loop",
+    )
+    p.add_argument("--steady-trim", type=float, default=0.1, help="Доля разгона/затухания, отбрасываемая при steady-throughput")
+    p.add_argument("--results-dir", type=str, default="benchmarks/results", help="Каталог для сохранения результатов")
+    p.add_argument("--no-save", action="store_true", help="Не сохранять результат прогона в файлы")
+    p.add_argument("--run-tag", type=str, default="", help="Метка прогона (в имени файла и CSV)")
+    p.add_argument("--note", type=str, default="", help="Произвольная заметка к прогону")
+    p.add_argument("--backend-replicas", type=int, default=0, help="Число backend-контейнеров (для метаданных)")
+    p.add_argument("--pool-workers", type=int, default=0, help="MODERATION_POOL_WORKERS на контейнер (для метаданных)")
+    p.add_argument("--prefetch", type=int, default=0, help="prefetch воркера (для метаданных)")
     args = p.parse_args()
 
     run(
@@ -1205,6 +1587,15 @@ def main():
         spam_label_col=(args.spam_label_col.strip() if args.spam_label_col else None),
         send_workers=args.send_workers,
         send_timeout=args.send_timeout,
+        target_rate=args.target_rate,
+        arrival=args.arrival,
+        steady_trim=args.steady_trim,
+        results_dir=(None if args.no_save else args.results_dir),
+        run_tag=args.run_tag,
+        note=args.note,
+        backend_replicas=args.backend_replicas,
+        pool_workers=args.pool_workers,
+        prefetch=args.prefetch,
     )
 
 

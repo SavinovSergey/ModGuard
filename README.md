@@ -319,6 +319,14 @@ python scripts/run/validate_chain.py \
    --duplicate-after-sec 20
 ```
 
+### Методика и хранилище результатов
+
+Корректная методика замеров (open-loop нагрузка, latency от запланированного
+времени прибытия, throughput на установившемся плато, серверная single-latency)
+и автоматическое сохранение каждого прогона (JSON + CSV-сводка + Markdown-отчёт)
+описаны в [benchmarks/README.md](benchmarks/README.md). Там же — построение кривой
+latency-vs-load (`scripts/run/benchmark_sweep.py`).
+
 ## Конфигурация
 
 Настройки задаются через переменные окружения (см. `.env.example`):

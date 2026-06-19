@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     workers: int = 4
     # both — tox и spam параллельно; tox_only / spam_only — для бенчмарков (вторая ветка — заглушка)
     moderation_pipeline: Literal["both", "tox_only", "spam_only"] = "both"
+    # Число процессов в каждом пуле (tox / spam) воркера. >1 — параллельный инференс
+    # нескольких батчей внутри контейнера (по одному ядру на процесс).
+    moderation_pool_workers: int = 1
 
     @field_validator("moderation_pipeline", mode="before")
     @classmethod
@@ -60,6 +63,8 @@ class Settings(BaseSettings):
     # Логирование
     log_level: str = "INFO"
     log_format: str = "json"  # json или text
+    # Поэтапные метки времени цепочки (chain_timing) — для профилирования через validate_chain
+    chain_timing: bool = False
     
     # Сервер
     host: str = "0.0.0.0"

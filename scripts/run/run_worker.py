@@ -29,6 +29,7 @@ async def process_task(
     cache,
     classification_service,
 ) -> None:
+    from app.core import chain_timing
     from app.core.db import set_task_failed_pg, set_task_processing_pg, set_task_result_pg
     from app.core.queue_async import publish_task_result
 
@@ -37,29 +38,36 @@ async def process_task(
     source = body.get("source")
     preferred_model = body.get("preferred_model")
     texts = [item.get("text", "") for item in items]
-    logger.info("Processing task %s, %d items", task_id, len(texts))
+    n_items = len(texts)
+    logger.info("Processing task %s, %d items", task_id, n_items)
 
+    chain_timing.mark("worker", "mq_consume", "start", task_id=task_id, n_items=n_items)
     try:
-        await set_task_processing_pg(task_id)
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(
-            None,
-            lambda: classification_service.classify_batch(texts, preferred_model=preferred_model),
-        )
-        await set_task_result_pg(task_id, results, status="completed")
+        with chain_timing.stage("worker", "task", task_id=task_id, n_items=n_items):
+            await set_task_processing_pg(task_id)
+            loop = asyncio.get_running_loop()
+            with chain_timing.stage("worker", "classify", task_id=task_id, n_items=n_items):
+                results = await loop.run_in_executor(
+                    None,
+                    lambda: classification_service.classify_batch(texts, preferred_model=preferred_model),
+                )
+            with chain_timing.stage("worker", "pg_result", task_id=task_id, n_items=n_items):
+                await set_task_result_pg(task_id, results, status="completed")
 
-        cache_pairs = [
-            (text, r)
-            for text, r in zip(texts, results)
-            if text and (r.get("tox_model_used") or r.get("spam_model_used"))
-        ]
-        n_written = await cache.aset_cached_results_batch(cache_pairs)
+            cache_pairs = [
+                (text, r)
+                for text, r in zip(texts, results)
+                if text and (r.get("tox_model_used") or r.get("spam_model_used"))
+            ]
+            with chain_timing.stage("worker", "redis_cache", task_id=task_id, n_items=len(cache_pairs)):
+                n_written = await cache.aset_cached_results_batch(cache_pairs)
 
-        out_results = []
-        for i, r in enumerate(results):
-            ref = items[i].get("ref") if i < len(items) else None
-            out_results.append({"ref": ref, **r})
-        await publish_task_result(task_id, source, out_results)
+            out_results = []
+            for i, r in enumerate(results):
+                ref = items[i].get("ref") if i < len(items) else None
+                out_results.append({"ref": ref, **r})
+            with chain_timing.stage("worker", "mq_publish_result", task_id=task_id, n_items=n_items):
+                await publish_task_result(task_id, source, out_results)
         logger.info("Task %s completed, cache_written=%d", task_id, n_written)
     except Exception as e:
         logger.exception("Task %s failed: %s", task_id, e)
@@ -104,7 +112,7 @@ async def async_main() -> None:
         await process_task(body, cache, classification_service)
 
     try:
-        await consume_requests(on_message, prefetch_count=5)
+        await consume_requests(on_message, prefetch_count=12)
     finally:
         classification_service.shutdown()
         await close_queue_publisher()

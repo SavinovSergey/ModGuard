@@ -1,4 +1,5 @@
 """API: только постановка задач в очередь и выдача результата по task_id. Классификация в backend."""
+import asyncio
 import logging
 import uuid
 from typing import List, Optional
@@ -15,6 +16,7 @@ from app.api.schemas import (
     HealthResponse,
     StatsResponse,
 )
+from app.core import chain_timing
 from app.core.config import settings
 from app.core.task_store import TaskStore
 from app.core.cache import ModerationCache, NoOpModerationCache
@@ -82,21 +84,32 @@ async def classify(request: ClassifyRequest, request_ctx: Request):
     items_payload = [{"id": "0", "text": request.text}]
     source = "web"
 
-    cached = await _aget_cached_safe(cache, request.text)
-    if cached is not None:
-        await create_task_pg(task_id, items_payload, source=source)
-        await set_task_result_pg(task_id, [cached], status="completed", from_cache=True)
-        await publish_task_result(task_id, source, [{"ref": {}, **cached}])
-        return ClassifySubmitResponse(task_id=task_id)
+    with chain_timing.stage("api", "batch_async", task_id=task_id, n_items=1):
+        with chain_timing.stage("api", "cache_lookup", task_id=task_id, n_items=1):
+            cached = await _aget_cached_safe(cache, request.text)
 
-    await create_task_pg(task_id, items_payload, source=source)
-    await publish_task_request(
-        task_id,
-        [{"text": request.text, "ref": {}}],
-        source=source,
-        preferred_model=request.preferred_model,
-    )
-    return ClassifySubmitResponse(task_id=task_id)
+        if cached is not None:
+            with chain_timing.stage("api", "pg_create_task", task_id=task_id, n_items=1):
+                await create_task_pg(task_id, items_payload, source=source)
+            # set_task_result обновляет уже вставленные task_items; publish независим — параллельно
+            await asyncio.gather(
+                set_task_result_pg(task_id, [cached], status="completed", from_cache=True),
+                publish_task_result(task_id, source, [{"ref": {}, **cached}]),
+            )
+            return ClassifySubmitResponse(task_id=task_id)
+
+        # create_task_pg должен завершиться до publish: иначе воркер обновит ещё не
+        # вставленные task_items и потеряет результат.
+        with chain_timing.stage("api", "pg_create_task", task_id=task_id, n_items=1):
+            await create_task_pg(task_id, items_payload, source=source)
+        with chain_timing.stage("api", "mq_publish_request", task_id=task_id, n_items=1):
+            await publish_task_request(
+                task_id,
+                [{"text": request.text, "ref": {}}],
+                source=source,
+                preferred_model=request.preferred_model,
+            )
+        return ClassifySubmitResponse(task_id=task_id)
 
 
 @router.post(
@@ -117,64 +130,84 @@ async def classify_batch_async(request: BatchAsyncRequest, request_ctx: Request)
     _require_queue()
     cache = get_moderation_cache(request_ctx)
     source = request.source or "web"
+    n_total = len(request.items)
 
-    items_payload = [{"id": item.id or str(i), "text": item.text} for i, item in enumerate(request.items)]
-    cache_hits = await _aget_cached_batch_safe(cache, [item.text for item in request.items])
+    with chain_timing.stage("api", "batch_async", n_items=n_total):
+        items_payload = [{"id": item.id or str(i), "text": item.text} for i, item in enumerate(request.items)]
+        with chain_timing.stage("api", "cache_lookup", n_items=n_total):
+            cache_hits = await _aget_cached_batch_safe(cache, [item.text for item in request.items])
 
-    cached_results = []  # (index, result, ref)
-    miss_items = []  # (index, item with ref)
-    for i, item in enumerate(request.items):
-        ref = getattr(item, "ref", None) or {}
-        c = cache_hits[i]
-        if c is not None:
-            cached_results.append((i, c, ref))
-        else:
-            miss_items.append((i, {"text": item.text, "ref": ref}))
+        cached_results = []  # (index, result, ref)
+        miss_items = []  # (index, item with ref)
+        for i, item in enumerate(request.items):
+            ref = getattr(item, "ref", None) or {}
+            c = cache_hits[i]
+            if c is not None:
+                cached_results.append((i, c, ref))
+            else:
+                miss_items.append((i, {"text": item.text, "ref": ref}))
 
-    n_cached = len(cached_results)
-    n_miss = len(miss_items)
+        n_cached = len(cached_results)
+        n_miss = len(miss_items)
 
-    if n_cached == len(request.items):
-        task_id = str(uuid.uuid4())
-        by_index = {i: (c, ref) for i, c, ref in cached_results}
-        results_for_db = [by_index[i][0] for i in range(len(request.items))]
-        out = [{"ref": by_index[i][1], **by_index[i][0]} for i in range(len(request.items))]
-        await create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
-        await set_task_result_pg(task_id, results_for_db, status="completed", from_cache=True)
-        await publish_task_result(task_id, source, out)
-        return BatchAsyncResponse(task_id=task_id)
+        if n_cached == n_total:
+            task_id = str(uuid.uuid4())
+            by_index = {i: (c, ref) for i, c, ref in cached_results}
+            results_for_db = [by_index[i][0] for i in range(n_total)]
+            out = [{"ref": by_index[i][1], **by_index[i][0]} for i in range(n_total)]
+            with chain_timing.stage("api", "pg_create_task", task_id=task_id, n_items=n_total):
+                await create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
+            await asyncio.gather(
+                set_task_result_pg(task_id, results_for_db, status="completed", from_cache=True),
+                publish_task_result(task_id, source, out),
+            )
+            return BatchAsyncResponse(task_id=task_id)
 
-    if n_miss == len(request.items):
-        task_id = str(uuid.uuid4())
-        items_for_queue = [{"text": item.text, "ref": {}} for item in request.items]
-        await create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
-        await publish_task_request(
-            task_id,
-            items_for_queue,
-            source=request.source,
-            preferred_model=request.preferred_model,
-        )
-        return BatchAsyncResponse(task_id=task_id)
+        if n_miss == n_total:
+            task_id = str(uuid.uuid4())
+            items_for_queue = [{"text": item.text, "ref": {}} for item in request.items]
+            with chain_timing.stage("api", "pg_create_task", task_id=task_id, n_items=n_total):
+                await create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
+            with chain_timing.stage("api", "mq_publish_request", task_id=task_id, n_items=n_total):
+                await publish_task_request(
+                    task_id,
+                    items_for_queue,
+                    source=request.source,
+                    preferred_model=request.preferred_model,
+                )
+            return BatchAsyncResponse(task_id=task_id)
 
-    task_id_cached = str(uuid.uuid4())
-    task_id_miss = str(uuid.uuid4())
-    payload_cached = [items_payload[i] for i, _, _ in cached_results]
-    payload_miss = [items_payload[i] for i, _ in miss_items]
-    results_cached = [c for _, c, _ in cached_results]
-    await create_task_pg(task_id_cached, payload_cached, source=source, user_id=request.user_id)
-    await set_task_result_pg(task_id_cached, results_cached, status="completed", from_cache=True)
-    out_cached = [{"ref": ref, **c} for _, c, ref in cached_results]
-    await publish_task_result(task_id_cached, source, out_cached)
+        # Частичный кэш: cached- и miss-подзадачи независимы (разные task_id) — выполняем
+        # конкурентно, сохраняя порядок внутри каждой (create → publish).
+        task_id_cached = str(uuid.uuid4())
+        task_id_miss = str(uuid.uuid4())
+        payload_cached = [items_payload[i] for i, _, _ in cached_results]
+        payload_miss = [items_payload[i] for i, _ in miss_items]
+        results_cached = [c for _, c, _ in cached_results]
+        out_cached = [{"ref": ref, **c} for _, c, ref in cached_results]
+        items_miss_for_queue = [{"text": m["text"], "ref": m["ref"]} for _, m in miss_items]
 
-    items_miss_for_queue = [{"text": m["text"], "ref": m["ref"]} for _, m in miss_items]
-    await create_task_pg(task_id_miss, payload_miss, source=source, user_id=request.user_id)
-    await publish_task_request(
-        task_id_miss,
-        items_miss_for_queue,
-        source=request.source,
-        preferred_model=request.preferred_model,
-    )
-    return BatchAsyncResponse(task_id=task_id_miss, task_ids=[task_id_cached, task_id_miss])
+        async def _handle_cached() -> None:
+            with chain_timing.stage("api", "pg_create_task", task_id=task_id_cached, n_items=n_cached):
+                await create_task_pg(task_id_cached, payload_cached, source=source, user_id=request.user_id)
+            await asyncio.gather(
+                set_task_result_pg(task_id_cached, results_cached, status="completed", from_cache=True),
+                publish_task_result(task_id_cached, source, out_cached),
+            )
+
+        async def _handle_miss() -> None:
+            with chain_timing.stage("api", "pg_create_task", task_id=task_id_miss, n_items=n_miss):
+                await create_task_pg(task_id_miss, payload_miss, source=source, user_id=request.user_id)
+            with chain_timing.stage("api", "mq_publish_request", task_id=task_id_miss, n_items=n_miss):
+                await publish_task_request(
+                    task_id_miss,
+                    items_miss_for_queue,
+                    source=request.source,
+                    preferred_model=request.preferred_model,
+                )
+
+        await asyncio.gather(_handle_cached(), _handle_miss())
+        return BatchAsyncResponse(task_id=task_id_miss, task_ids=[task_id_cached, task_id_miss])
 
 
 @router.get(

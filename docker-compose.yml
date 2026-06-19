@@ -13,6 +13,7 @@ services:
     environment:
       - LOG_LEVEL=INFO
       - API_PREFIX=/api/v1
+      - CHAIN_TIMING=${CHAIN_TIMING:-0}
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/modguard
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
@@ -52,7 +53,15 @@ services:
     environment:
       - MODERATION_PIPELINE=both
       - MODEL_TYPE=regex
+      - MODERATION_POOL_WORKERS=${MODERATION_POOL_WORKERS:-1}
+      # Один поток BLAS на процесс: модели считаются в нескольких процессах,
+      # многопоточный BLAS привёл бы к переподписке ядер (сотни потоков на 16 CPU).
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
       - LOG_LEVEL=INFO
+      - CHAIN_TIMING=${CHAIN_TIMING:-0}
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/modguard
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/

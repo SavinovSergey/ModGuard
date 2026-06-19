@@ -113,19 +113,27 @@ class ClassificationService:
             run_toxicity_batch,
         )
 
-        logger.info("Starting moderation process pools (toxicity + spam)...")
+        n_workers = max(1, settings.moderation_pool_workers)
+        logger.info(
+            "Starting moderation process pools (toxicity + spam, workers=%d each)...",
+            n_workers,
+        )
         t0 = time.perf_counter()
         self._tox_pool = ProcessPoolExecutor(
-            max_workers=1,
+            max_workers=n_workers,
             initializer=init_toxicity_process_worker,
         )
         self._spam_pool = ProcessPoolExecutor(
-            max_workers=1,
+            max_workers=n_workers,
             initializer=init_spam_process_worker,
         )
-        # Прогрев: дождаться initializer в обоих процессах.
-        self._tox_pool.submit(run_toxicity_batch, ([], None)).result()
-        self._spam_pool.submit(run_spam_batch, []).result()
+        # Прогрев: дождаться initializer во всех процессах каждого пула.
+        tox_warm = [self._tox_pool.submit(run_toxicity_batch, ([], None)) for _ in range(n_workers)]
+        spam_warm = [self._spam_pool.submit(run_spam_batch, []) for _ in range(n_workers)]
+        for f in tox_warm:
+            f.result()
+        for f in spam_warm:
+            f.result()
         self._pools_ready = True
         logger.info(
             "Moderation process pools ready in %.1fs",
@@ -264,6 +272,15 @@ class ClassificationService:
             )
 
         wall_ms = (time.perf_counter() - t_wall0) * 1000
+        from app.core import chain_timing
+
+        if chain_timing.enabled():
+            chain_timing.mark(
+                "worker", "classify_tox", "end", n_items=len(miss_texts), ms=tox_ms
+            )
+            chain_timing.mark(
+                "worker", "classify_spam", "end", n_items=len(miss_texts), ms=spam_ms
+            )
         logger.info(
             "Classify batch timing mode=%s executor=%s items=%d "
             "wall_ms=%.0f tox_ms=%.0f spam_ms=%.0f",

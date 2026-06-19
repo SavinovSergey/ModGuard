@@ -1,4 +1,5 @@
 """Async RabbitMQ (aio-pika): publisher и consumer, один channel на процесс."""
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -116,14 +117,36 @@ async def consume_requests(
     handler: MessageHandler,
     prefetch_count: int = 1,
 ) -> None:
-    """Бесконечно потребляет moderation.requests и вызывает async handler(body)."""
+    """Потребляет moderation.requests, обрабатывая до prefetch_count сообщений конкурентно.
+
+    Конкурентность нужна, чтобы I/O одного батча (Postgres/Redis/RabbitMQ) перекрывался
+    с вычислением другого, а не суммировался последовательно. Число одновременных
+    обработчиков ограничено prefetch_count (он же qos), чтобы не выгребать всю очередь.
+    """
     channel = _require_channel()
     await channel.set_qos(prefetch_count=prefetch_count)
     queue = await channel.declare_queue(settings.rabbitmq_queue_requests, durable=True)
-    logger.info("Worker consuming from %s (prefetch=%s)", settings.rabbitmq_queue_requests, prefetch_count)
+    logger.info(
+        "Worker consuming from %s (prefetch=%s, concurrent)",
+        settings.rabbitmq_queue_requests,
+        prefetch_count,
+    )
 
-    async with queue.iterator() as queue_iter:
-        async for message in queue_iter:
-            async with message.process(requeue=True):
-                data = json.loads(message.body.decode("utf-8"))
-                await handler(data)
+    in_flight: set[asyncio.Task] = set()
+
+    async def _process_one(message: aio_pika.IncomingMessage) -> None:
+        async with message.process(requeue=True):
+            data = json.loads(message.body.decode("utf-8"))
+            await handler(data)
+
+    try:
+        async with queue.iterator() as queue_iter:
+            async for message in queue_iter:
+                task = asyncio.create_task(_process_one(message))
+                in_flight.add(task)
+                task.add_done_callback(in_flight.discard)
+                if len(in_flight) >= prefetch_count:
+                    await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if in_flight:
+            await asyncio.gather(*in_flight, return_exceptions=True)
