@@ -36,7 +36,16 @@ from scripts.shared.cli import (
     add_common_random_state_arg,
 )
 from scripts.shared.common import find_threshold_max_f1_min_precision
-from scripts.shared.data import load_train_val_data, prepare_texts_classical
+from scripts.shared.data import load_train_val_data
+from app.preprocessing.text_processor import TextProcessor
+
+
+# Совпадает с inference (params.json → TfidfModel.configure_text_processor)
+DEFAULT_PREPROCESSING = {
+    "use_lemmatization": False,
+    "remove_stopwords": True,
+    "remove_punkt": True,
+}
 
 
 class TfidfModelTrainer:
@@ -47,7 +56,13 @@ class TfidfModelTrainer:
         n_folds: int = 5,
         n_trials: int = 50,
         use_cv: bool = True,
-        random_state: int = 42
+        random_state: int = 42,
+        *,
+        use_lemmatization: bool = DEFAULT_PREPROCESSING["use_lemmatization"],
+        remove_stopwords: bool = DEFAULT_PREPROCESSING["remove_stopwords"],
+        remove_punkt: bool = DEFAULT_PREPROCESSING["remove_punkt"],
+        min_ngram: int = 2,
+        max_ngram: int = 6,
     ):
         """
         Args:
@@ -55,11 +70,28 @@ class TfidfModelTrainer:
             n_trials: Количество trials для Optuna
             use_cv: Использовать кросс-валидацию (True) или train/val split (False)
             random_state: Random state для воспроизводимости
+            use_lemmatization: Лемматизация (по умолчанию выкл., как на inference)
+            remove_stopwords: Удаление стоп-слов
+            remove_punkt: Удаление пунктуации в normalize()
+            min_ngram: Нижняя граница ngram_range для Optuna (min)
+            max_ngram: Верхняя граница ngram_range для Optuna (max)
         """
+        if min_ngram > max_ngram:
+            raise ValueError(f"min_ngram ({min_ngram}) не может быть больше max_ngram ({max_ngram})")
         self.n_folds = n_folds
         self.n_trials = n_trials
         self.use_cv = use_cv
         self.random_state = random_state
+        self.use_lemmatization = use_lemmatization
+        self.remove_stopwords = remove_stopwords
+        self.remove_punkt = remove_punkt
+        self.min_ngram = min_ngram
+        self.max_ngram = max_ngram
+        self.preprocessing = {
+            "use_lemmatization": use_lemmatization,
+            "remove_stopwords": remove_stopwords,
+            "remove_punkt": remove_punkt,
+        }
         self.best_params = None
         self.best_model = None
         self.best_vectorizer = None
@@ -79,17 +111,26 @@ class TfidfModelTrainer:
     
     def prepare_data(self, df: pd.DataFrame, text_col: str = 'text', label_col: str = 'label'):
         """
-        Подготовка данных для обучения
-        
-        Args:
-            df: DataFrame с данными
-            text_col: Название колонки с текстом
-            label_col: Название колонки с метками
-        
-        Returns:
-            X_processed, y
+        Подготовка данных для обучения (тот же TextProcessor, что на inference).
         """
-        return prepare_texts_classical(df, text_col=text_col, label_col=label_col)
+        print("Preprocessing text (toxicity pipeline)...")
+        processor = TextProcessor(
+            use_lemmatization=self.use_lemmatization,
+            remove_stopwords=self.remove_stopwords,
+            remove_punkt=self.remove_punkt,
+        )
+        frame = df.copy()
+        texts = frame[text_col].fillna("").astype(str).tolist()
+        frame["processed_text"] = processor.process_batch(texts)
+        frame = frame[frame["processed_text"].str.len() > 0]
+
+        x = frame["processed_text"].values
+        y = frame[label_col].values
+
+        print(f"Prepared {len(x)} examples")
+        print(f"Class distribution: {np.bincount(y)}")
+        print(f"Preprocessing: {self.preprocessing}")
+        return x, y
     
     def get_objective_score(self, X_train, X_val, y_train, y_val, params):
         """
@@ -144,12 +185,13 @@ class TfidfModelTrainer:
         чтобы избежать утечки данных (data leakage).
         """
         # Параметры для TF-IDF
+        min_ng = trial.suggest_int('min_ngram', self.min_ngram, self.max_ngram)
+        max_ng = trial.suggest_int('max_ngram', self.min_ngram, self.max_ngram)
+        if min_ng > max_ng:
+            min_ng, max_ng = max_ng, min_ng
         tfidf_params = {
-            'max_features': trial.suggest_int('max_features', 10000, 150000, step=10000),
-            'ngram_range': (
-                trial.suggest_int('min_ngram', 2, 3),
-                trial.suggest_int('max_ngram', 4, 6)
-            ),
+            'max_features': trial.suggest_int('max_features', 10000, 70000, step=10000),
+            'ngram_range': (min_ng, max_ng),
             'use_idf': trial.suggest_categorical('use_idf', [True, False]),
             'norm': trial.suggest_categorical('norm', ['l1', 'l2']),
             'min_df': trial.suggest_int('min_df', 1, 30),
@@ -209,6 +251,7 @@ class TfidfModelTrainer:
             Лучшие параметры и модель
         """
         print(f"\nНачинаем оптимизацию с {self.n_trials} trials...")
+        print(f"Диапазон ngram_range для Optuna: min∈[{self.min_ngram}, {self.max_ngram}], max∈[{self.min_ngram}, {self.max_ngram}]")
         if self.use_cv:
             print(f"Используем {self.n_folds}-fold кросс-валидацию\n")
         else:
@@ -348,10 +391,11 @@ class TfidfModelTrainer:
                 'best_score_metric': 'average_precision',
                 'optimal_threshold': self.optimal_threshold,
                 'n_folds': self.n_folds,
-                'random_state': self.random_state
+                'random_state': self.random_state,
+                'preprocessing': self.preprocessing,
             }
-            with open(params_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            with open(params_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
             print(f"Параметры сохранены: {params_path}")
 
 
@@ -362,7 +406,38 @@ def main():
     add_common_optuna_args(parser)
     add_common_output_arg(parser, default_output_dir='models/toxicity/tfidf')
     add_common_random_state_arg(parser)
+    parser.add_argument(
+        "--use-lemmatization",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_PREPROCESSING["use_lemmatization"],
+        help="Лемматизация (по умолчанию выкл., как на inference)",
+    )
+    parser.add_argument(
+        "--remove-stopwords",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_PREPROCESSING["remove_stopwords"],
+    )
+    parser.add_argument(
+        "--remove-punkt",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_PREPROCESSING["remove_punkt"],
+    )
+    parser.add_argument(
+        "--min-ngram",
+        type=int,
+        default=2,
+        help="Нижняя граница ngram_range (min) для Optuna",
+    )
+    parser.add_argument(
+        "--max-ngram",
+        type=int,
+        default=6,
+        help="Верхняя граница ngram_range (max) для Optuna",
+    )
     args = parser.parse_args()
+
+    if args.min_ngram > args.max_ngram:
+        parser.error(f"--min-ngram ({args.min_ngram}) не может быть больше --max-ngram ({args.max_ngram})")
     
     df_train, df_val, use_cv = load_train_val_data(
         data_path=args.data,
@@ -376,6 +451,11 @@ def main():
         n_trials=args.n_trials,
         use_cv=use_cv,
         random_state=args.random_state,
+        use_lemmatization=args.use_lemmatization,
+        remove_stopwords=args.remove_stopwords,
+        remove_punkt=args.remove_punkt,
+        min_ngram=args.min_ngram,
+        max_ngram=args.max_ngram,
     )
     
     # Подготовка данных

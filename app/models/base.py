@@ -63,6 +63,20 @@ class ClassicalTextModelBase(BaseToxicityModel, ABC):
         super().__init__(model_name=model_name, model_type=model_type)
         self.text_processor = TextProcessor()
 
+    def configure_text_processor(
+        self,
+        *,
+        use_lemmatization: bool = True,
+        remove_stopwords: bool = True,
+        remove_punkt: bool = True,
+    ) -> None:
+        """Согласовать препроцессинг инференса с обучением (блок preprocessing в params.json)."""
+        self.text_processor = TextProcessor(
+            use_lemmatization=use_lemmatization,
+            remove_stopwords=remove_stopwords,
+            remove_punkt=remove_punkt,
+        )
+
     def preprocess_text(self, text: str) -> str:
         if text is None or not isinstance(text, str):
             return ""

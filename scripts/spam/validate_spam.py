@@ -120,7 +120,8 @@ def _run_tfidf(
     Path(importances_path).parent.mkdir(parents=True, exist_ok=True)
     coef = model.model.coef_[0]
     tfidf_names = model.vectorizer.get_feature_names_out()
-    all_names = list(tfidf_names) + list(SPAM_FEATURE_NAMES)
+    extra_names = list(model.spam_feature_names) if model.use_extra_features else []
+    all_names = list(tfidf_names) + extra_names
     imp_df = pd.DataFrame({
         "feature": all_names,
         "coefficient": coef,

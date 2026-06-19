@@ -32,9 +32,11 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from app.features.spam_features import (
     SPAM_FEATURE_NAMES,
+    SPAM_FEATURE_NAMES_MINIMAL,
     extract_spam_features_batch,
     matches_caps_word_double_excl_rule,
     matches_caps_word_rule,
+    resolve_spam_feature_names,
 )
 from scripts.shared.cli import (
     add_common_data_args,
@@ -69,9 +71,10 @@ def _build_combined(
     raw_texts: np.ndarray,
     scaler: Optional[StandardScaler],
     fit_scaler: bool,
+    feature_names: List[str],
 ) -> Tuple[Any, Optional[StandardScaler]]:
     """Строит [X_tfidf | X_features]. Если fit_scaler — обучает scaler на фичах."""
-    X_feat = extract_spam_features_batch(list(raw_texts))
+    X_feat = extract_spam_features_batch(list(raw_texts), feature_names=feature_names)
     if fit_scaler:
         scaler = StandardScaler()
         scaler.fit(X_feat)
@@ -91,11 +94,25 @@ class SpamTfidfTrainer:
         n_trials: int = 50,
         use_cv: bool = True,
         random_state: int = 42,
+        spam_feature_names: Optional[List[str]] = None,
+        max_features_min: int = 10000,
+        max_features_max: int = 35000,
+        max_features_step: int = 5000,
+        min_ngram: Optional[int] = None,
+        max_ngram: Optional[int] = None,
     ):
         self.n_folds = n_folds
         self.n_trials = n_trials
         self.use_cv = use_cv
         self.random_state = random_state
+        self.spam_feature_names = resolve_spam_feature_names(
+            spam_feature_names or SPAM_FEATURE_NAMES
+        )
+        self.max_features_min = max_features_min
+        self.max_features_max = max_features_max
+        self.max_features_step = max_features_step
+        self.min_ngram = min_ngram
+        self.max_ngram = max_ngram
         self.best_params = None
         self.best_model = None
         self.best_vectorizer = None
@@ -128,9 +145,11 @@ class SpamTfidfTrainer:
         X_train_tfidf = vec.fit_transform(X_train)
         X_val_tfidf = vec.transform(X_val)
         X_train_combined, scaler = _build_combined(
-            X_train_tfidf, raw_train, None, fit_scaler=True
+            X_train_tfidf, raw_train, None, fit_scaler=True, feature_names=self.spam_feature_names
         )
-        X_val_combined, _ = _build_combined(X_val_tfidf, raw_val, scaler, fit_scaler=False)
+        X_val_combined, _ = _build_combined(
+            X_val_tfidf, raw_val, scaler, fit_scaler=False, feature_names=self.spam_feature_names
+        )
         model = LogisticRegression(
             class_weight="balanced",
             max_iter=1000,
@@ -153,12 +172,21 @@ class SpamTfidfTrainer:
         y_val: Optional[np.ndarray] = None,
         raw_val: Optional[np.ndarray] = None,
     ) -> float:
-        min_ngram = trial.suggest_int("min_ngram", 2, 2)
-        max_ngram = trial.suggest_int("max_ngram", 4, 4)
-        if min_ngram > max_ngram:
-            min_ngram, max_ngram = max_ngram, min_ngram
+        if self.min_ngram is not None and self.max_ngram is not None:
+            min_ngram = trial.suggest_int("min_ngram", self.min_ngram, self.min_ngram)
+            max_ngram = trial.suggest_int("max_ngram", self.max_ngram, self.max_ngram)
+        else:
+            min_ngram = trial.suggest_int("min_ngram", 1, 2)
+            max_ngram = trial.suggest_int("max_ngram", 3, 4)
+            if min_ngram > max_ngram:
+                min_ngram, max_ngram = max_ngram, min_ngram
         tfidf_params = {
-            "max_features": trial.suggest_int("max_features", 20000, 60000, step=5000),
+            "max_features": trial.suggest_int(
+                "max_features",
+                self.max_features_min,
+                self.max_features_max,
+                step=self.max_features_step,
+            ),
             "ngram_range": (min_ngram, max_ngram),
             "min_df": trial.suggest_int("min_df", 5, 30),
             "max_df": trial.suggest_float("max_df", 0.3, 0.7),
@@ -244,7 +272,7 @@ class SpamTfidfTrainer:
         self.best_vectorizer = TfidfVectorizer(**tfidf_params)
         X_train_tfidf = self.best_vectorizer.fit_transform(X_train)
         X_train_combined, self.scaler = _build_combined(
-            X_train_tfidf, raw_train, None, fit_scaler=True
+            X_train_tfidf, raw_train, None, fit_scaler=True, feature_names=self.spam_feature_names
         )
         self.best_model = LogisticRegression(
             class_weight="balanced",
@@ -256,7 +284,7 @@ class SpamTfidfTrainer:
         if X_val is not None and y_val is not None and raw_val is not None:
             X_val_tfidf = self.best_vectorizer.transform(X_val)
             X_val_combined, _ = _build_combined(
-                X_val_tfidf, raw_val, self.scaler, fit_scaler=False
+                X_val_tfidf, raw_val, self.scaler, fit_scaler=False, feature_names=self.spam_feature_names
             )
             y_proba = self.best_model.predict_proba(X_val_combined)[:, 1]
             y_true = y_val
@@ -322,7 +350,7 @@ class SpamTfidfTrainer:
                 "random_state": self.random_state,
                 "classifier": "LogisticRegression",
                 "use_extra_features": True,
-                "spam_feature_names": SPAM_FEATURE_NAMES,
+                "spam_feature_names": self.spam_feature_names,
                 "tfidf_analyzer": "char_wb",
                 "tfidf_ngram_range": ngram_range,
                 "tfidf_lowercase": False,
@@ -338,24 +366,57 @@ def main() -> None:
     add_common_optuna_args(parser)
     add_common_output_arg(parser, default_output_dir="models/spam/tfidf")
     add_common_random_state_arg(parser)
+    parser.add_argument(
+        "--feature-set",
+        choices=("full", "minimal"),
+        default="full",
+        help="Набор ручных признаков: full (17) или minimal (length + space_ratio)",
+    )
+    parser.add_argument("--max-features-min", type=int, default=10000)
+    parser.add_argument("--max-features-max", type=int, default=35000)
+    parser.add_argument("--max-features-step", type=int, default=5000)
+    parser.add_argument(
+        "--min-ngram",
+        type=int,
+        default=None,
+        help="Фиксированный min ngram (вместе с --max-ngram отключает поиск диапазона)",
+    )
+    parser.add_argument(
+        "--max-ngram",
+        type=int,
+        default=None,
+        help="Фиксированный max ngram",
+    )
     args = parser.parse_args()
+
+    feature_names = (
+        SPAM_FEATURE_NAMES_MINIMAL if args.feature_set == "minimal" else SPAM_FEATURE_NAMES
+    )
 
     df_train, df_val, use_cv = load_train_val_data(
         data_path=args.data,
         train_data_path=args.train_data,
         val_data_path=args.val_data,
     )
-    frac = 0.6
+    frac = 1
     df_train = df_train.sample(frac=frac, random_state=args.random_state)
     # Исключаем строки, подходящие под CAPS_WORD: на инференсе им всегда выдаём 1, модель учится на остальном
     df_train = _drop_caps_word_rows(df_train)
     if df_val is not None:
         df_val = _drop_caps_word_rows(df_val)
+    if (args.min_ngram is None) ^ (args.max_ngram is None):
+        parser.error("Укажите оба --min-ngram и --max-ngram или не указывайте ни одного")
     trainer = SpamTfidfTrainer(
         n_folds=args.n_folds,
         n_trials=args.n_trials,
         use_cv=use_cv,
         random_state=args.random_state,
+        spam_feature_names=feature_names,
+        max_features_min=args.max_features_min,
+        max_features_max=args.max_features_max,
+        max_features_step=args.max_features_step,
+        min_ngram=args.min_ngram,
+        max_ngram=args.max_ngram,
     )
     X_train, y_train, raw_train = trainer.prepare_data(
         df_train, return_raw=True

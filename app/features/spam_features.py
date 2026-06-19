@@ -5,6 +5,12 @@ from typing import List
 import numpy as np
 
 # Фиксированный порядок признаков для совместимости с пайплайном
+# Минимальный набор для inference (быстрые эвристики с высоким coef/низким cost)
+SPAM_FEATURE_NAMES_MINIMAL = [
+    "length_chars_log1p",
+    "space_ratio",
+]
+
 SPAM_FEATURE_NAMES = [
     "caps_ratio",
     "url_count",
@@ -236,6 +242,17 @@ def _phone_stats(text: str) -> tuple[int, float]:
     return count, 1.0 if count > 0 else 0.0
 
 
+def extract_spam_features_minimal(text: str) -> dict:
+    """Быстрый набор: length + space_ratio."""
+    if text is None:
+        text = ""
+    text = str(text).strip()
+    return {
+        "length_chars_log1p": float(np.log1p(len(text))),
+        "space_ratio": float(_space_ratio(text)),
+    }
+
+
 def extract_spam_features(text: str) -> dict:
     """Извлекает ручные признаки из сырого текста. Возвращает словарь с ключами из SPAM_FEATURE_NAMES."""
     if text is None:
@@ -286,10 +303,28 @@ def extract_spam_features(text: str) -> dict:
     }
 
 
-def extract_spam_features_batch(texts: List[str]) -> np.ndarray:
-    """Батч: возвращает матрицу (n, len(SPAM_FEATURE_NAMES)) в порядке SPAM_FEATURE_NAMES."""
+def resolve_spam_feature_names(feature_names: List[str] | None = None) -> List[str]:
+    if not feature_names:
+        return list(SPAM_FEATURE_NAMES)
+    unknown = [n for n in feature_names if n not in SPAM_FEATURE_NAMES]
+    if unknown:
+        raise ValueError(f"Unknown spam features: {unknown}")
+    return list(feature_names)
+
+
+def _is_minimal_feature_set(names: List[str]) -> bool:
+    return names == SPAM_FEATURE_NAMES_MINIMAL
+
+
+def extract_spam_features_batch(
+    texts: List[str],
+    feature_names: List[str] | None = None,
+) -> np.ndarray:
+    """Батч: матрица (n, len(feature_names)) в заданном порядке."""
+    names = resolve_spam_feature_names(feature_names)
+    use_minimal = _is_minimal_feature_set(names)
     rows = []
     for t in texts:
-        d = extract_spam_features(t)
-        rows.append([d[name] for name in SPAM_FEATURE_NAMES])
+        d = extract_spam_features_minimal(t) if use_minimal else extract_spam_features(t)
+        rows.append([d[name] for name in names])
     return np.array(rows, dtype=np.float64)

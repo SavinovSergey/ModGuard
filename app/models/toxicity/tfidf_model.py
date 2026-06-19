@@ -82,6 +82,14 @@ class TfidfModel(ClassicalTextModelBase):
                     if 'optimal_threshold' in params:
                         self.optimal_threshold = float(params['optimal_threshold'])
                         logging.info(f"Загружен optimal_threshold: {self.optimal_threshold}")
+                    prep = params.get("preprocessing")
+                    if isinstance(prep, dict):
+                        self.configure_text_processor(
+                            use_lemmatization=bool(prep.get("use_lemmatization", True)),
+                            remove_stopwords=bool(prep.get("remove_stopwords", True)),
+                            remove_punkt=bool(prep.get("remove_punkt", True)),
+                        )
+                        logging.info("Загружены параметры preprocessing из params.json: %s", prep)
             except Exception as e:
                 logging.warning(f"Не удалось загрузить optimal_threshold из {params_path}: {e}")
                 logging.info(f"Используется порог по умолчанию: {self.optimal_threshold}")

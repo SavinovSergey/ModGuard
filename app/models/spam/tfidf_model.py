@@ -11,8 +11,11 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 from app.features.spam_features import (
+    SPAM_FEATURE_NAMES,
+    extract_spam_features_batch,
     matches_caps_word_double_excl_rule,
     matches_caps_word_rule,
+    resolve_spam_feature_names,
 )
 from app.preprocessing.spam_processor import SpamTextProcessor
 
@@ -40,6 +43,7 @@ class SpamTfidfModel:
         self.is_loaded = False
         self.use_extra_features: bool = False
         self.scaler: Optional[Any] = None
+        self.spam_feature_names: List[str] = list(SPAM_FEATURE_NAMES)
 
     def load(
         self,
@@ -78,6 +82,10 @@ class SpamTfidfModel:
                     if "optimal_threshold" in params:
                         self.optimal_threshold = float(params["optimal_threshold"])
                     self.use_extra_features = params.get("use_extra_features", False)
+                    if params.get("spam_feature_names"):
+                        self.spam_feature_names = resolve_spam_feature_names(
+                            params["spam_feature_names"]
+                        )
             except Exception as e:
                 logger.warning("Не удалось загрузить params для спама: %s", e)
         if self.use_extra_features:
@@ -106,8 +114,7 @@ class SpamTfidfModel:
             X_tfidf = self.vectorizer.transform(processed_texts)
         if not self.use_extra_features or self.scaler is None:
             return X_tfidf
-        from app.features.spam_features import extract_spam_features_batch
-        X_feat = extract_spam_features_batch(raw_texts)
+        X_feat = extract_spam_features_batch(raw_texts, feature_names=self.spam_feature_names)
         X_feat = self.scaler.transform(X_feat)
         X_feat_sparse = csr_matrix(X_feat.astype(np.float64))
         return sparse_hstack([X_tfidf, X_feat_sparse])
