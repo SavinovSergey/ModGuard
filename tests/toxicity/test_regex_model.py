@@ -22,10 +22,10 @@ def test_regex_model_predict_toxic():
     model = RegexModel()
     model.load()
     
-    result = model.predict("это ебать какой-то текст")
+    result = model.predict("это блять какой-то текст")
     assert result['is_toxic'] is True
     assert result['toxicity_score'] == 1.0
-    assert 'ебать' in result['toxicity_types']
+    assert 'бля' in result['toxicity_types']
 
 
 def test_regex_model_predict_non_toxic():
@@ -45,7 +45,7 @@ def test_regex_model_predict_batch():
     
     texts = [
         "нормальный текст",
-        "токсичный ебать текст"
+        "токсичный блять текст"
     ]
     
     results = model.predict_batch(texts)
