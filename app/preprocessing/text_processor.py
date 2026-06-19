@@ -38,11 +38,18 @@ except LookupError:
     stop_words = set(stopwords.words('russian'))
 
 # Предкомпилированные шаблоны normalize() — один раз при импорте модуля
+# URL: явная схема или www.; не матчим «www» внутри слов; обрезаем на <>"'
 _RE_URLS_EMAIL = re.compile(
-    r"(http|www)\S+|[a-z\d\._-]+@[a-z\d\._-]+\.[a-z\d\._-]+|@[a-z]+"
+    r"https?://[^\s<>\"']+"
+    r"|www\.[^\s<>\"']+"
+    r"|[a-z\d._+-]+@[a-z\d.-]+\.[a-z]{2,}(?:\.[a-z]{2,})?"
 )
 _RE_HTML_TAGS = re.compile(r"<.*?>")
-_RE_VK_MENTION = re.compile(r"\[id\d+|.+\], ")
+# VK: [id123|Имя], [club1|Группа] — без .+ (catastrophic backtracking)
+_RE_VK_MENTION = re.compile(
+    r"\[(?:id|club|public)\d+\|[^\]]+\],?\s*",
+    re.IGNORECASE,
+)
 _RE_HTML_ENTITIES = re.compile(r"&#\d+;|&.+;")
 _RE_PUNCTUATION = re.compile(r'[!\"#$%&\'\(\)*+,-./:;<=>?@\[\\\]^_`\{\|\}~]')
 _RE_MULTI_SPACE = re.compile(r"\s{2,}")
