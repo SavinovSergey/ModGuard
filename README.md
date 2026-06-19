@@ -221,8 +221,8 @@ GET /api/v1/stats
 - **rubert-tiny** — fine-tuned трансформер (в т.ч. ONNX)
 
 ### Спам
-- **Regex** — правила (в т.ч. CAPS_WORD)  
-- **TF-IDF** — TF-IDF + ручные признаки (капс, URL, email и т.д.)
+- **Regex** — правила (earnings, cta_links, recruitment)
+- **TF-IDF** — `char_wb (3,4)` + ручные признаки (`length_chars_log1p`, `space_ratio`)
 
 Артефакты обученных моделей сохраняются в каталоге `models/` (подкаталоги `models/toxicity/`, `models/spam/`). 
 Примеры обучения и запуска скриптов: [docs/SCRIPTS.md](docs/SCRIPTS.md).
@@ -233,6 +233,7 @@ GET /api/v1/stats
 - [Архитектура](docs/ARCHITECTURE.md) — компоненты, очереди, Backend, Action-сервисы, кэш, батчи  
 - [Структура проекта](docs/PROJECT_STRUCTURE.md) — дерево каталогов и назначение  
 - [Скрипты](docs/SCRIPTS.md) — описание и примеры запуска скриптов обучения и сервисов  
+- [Бенчмарки: методика и результаты](benchmarks/README.md) — throughput, latency, команды воспроизведения
 
 ## Оценка на тесте (without threshold tuning)
 
@@ -272,60 +273,30 @@ python scripts/spam/validate_spam.py \
 
 ## Производительность
 
-Результаты нагрузочного и latency-тестирования на полном стенде (API → RabbitMQ → worker → PostgreSQL/Redis).  
-Скрипт: `scripts/run/validate_chain.py`. Окружение: **CPU-only** (AMD Ryzen 7 8845H, 8C/16T, 3.8 GHz, 32GB RAM).
-
-
-### Batch under load
+Замеры на полном стенде **API → RabbitMQ → worker → PostgreSQL/Redis**  
+(4× backend, TF-IDF tox/spam `char_wb (3,4)`, pipeline `both`, cold cache).  
+Подробная методика, условия и команды: **[benchmarks/README.md](benchmarks/README.md)**.
 
 | Метрика | Значение |
-|---|---|
-| Throughput | **753 msg/sec** |
-| Обработано результатов | 78138 |
-| Success rate | **100%** (89/89 задач) |
-| Cache hit rate | 16.7% |
+|---------|----------|
+| **Пиковая throughput (steady, PG)** | **≈ 15.9k msg/s** |
+| Single-request latency (server, cold) | **p50 7 ms** |
+| **Batch latency (prod)** | batch=1000, **10k msg/s**: **p50 175 ms**, p99 242 ms |
+| Рабочая зона (p99 batch e2e < 300 ms) | **10k msg/s** при batch=1000 (≈63% C) |
 
-| Time, ms | p50 | p95 | p99 |
-|---|---|---|---|
-| Batch sending cold | 203 | 233 | 271 |
-| Batch sending hot | 379 | 408 | 412 |
-| Batch e2e latency cold | 790 | 930 | 1010 |
-| Batch e2e latency hot | 143 | 150 | 153 |
-
-
-### Single-request latency
-
-Замер на дедуплицированном наборе из 1 000 уникальных текстов (нормализация `strip+lower`).  
-Cold-cache — после очистки Redis; hot-cache — повторный прогон тех же текстов без очистки.
-
-| Режим | p50 | p95 | p99 | Min | Max |
-|---|---:|---:|---:|---:|---:|
-| **Cold-cache** | 243 ms | 249 ms | 253 ms | 234 ms | 258 ms |
-| **Hot-cache** | 35 ms | 38 ms | 39 ms | 31 ms | 58 ms |
-
-Ускорение за счёт Redis-кэша: **×6.78** (по среднему), при poll-interval = 200ms.
-
-### Команда для воспроизведения
+Замеры prod-сценария: open-loop, `POST /classify/batch-async`, batch=1000,
+cold cache, 4× backend. Capacity-дамп (`batch_size=1000`) даёт потолок ~16k msg/s;
+batch e2e при перегрузке ~2 s — метрика потолка, не SLA.
 
 ```bash
-python scripts/run/validate_chain.py \
-   --val-data data/toxicity/val.parquet \
-   --batch-size 1000 \
-   --delay-min-ms 1 \
-   --delay-max-ms 1 \
-   --clear-cache \
-   --single-latency-n 1000 \
-   --single-latency-mode cold-hot \
-   --duplicate-after-sec 20
+# Prod: batch=1000 при 10k msg/s
+.venv/bin/python scripts/run/validate_chain.py \
+  --val-data data/toxicity/val.parquet -n 50000 \
+  --batch-size 1000 --target-rate 10000 --arrival poisson \
+  --duplicate-ratio 0 --send-workers 16 --clear-cache \
+  --run-tag load-10k-batch1000 \
+  --backend-replicas 4 --pool-workers 1 --prefetch 12
 ```
-
-### Методика и хранилище результатов
-
-Корректная методика замеров (open-loop нагрузка, latency от запланированного
-времени прибытия, throughput на установившемся плато, серверная single-latency)
-и автоматическое сохранение каждого прогона (JSON + CSV-сводка + Markdown-отчёт)
-описаны в [benchmarks/README.md](benchmarks/README.md). Там же — построение кривой
-latency-vs-load (`scripts/run/benchmark_sweep.py`).
 
 ## Конфигурация
 

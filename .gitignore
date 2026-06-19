@@ -70,6 +70,9 @@ Thumbs.db
 .coverage
 htmlcov/
 
+# Benchmarks: агрегат перезаписывается при каждом прогоне (канон — в README и run_*.json)
+benchmarks/results/summary.csv
+
 ARCHITECTURE_PROPOSAL.md
 IMPLEMENTATION_PLAN.md
 IMPLEMENTATION_STATUS.md
