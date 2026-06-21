@@ -20,7 +20,8 @@ from app.core import chain_timing
 from app.core.config import settings
 from app.core.task_store import TaskStore
 from app.core.cache import ModerationCache, NoOpModerationCache
-from app.core.db import create_task_pg, get_task_pg, set_task_result_pg
+from app.core.db import create_task_pg, get_task_pg, set_task_result_pg, set_task_failed_pg
+from app.core.health import check_dependencies
 from app.core.queue_async import publish_task_request, publish_task_result
 from app import __version__
 
@@ -58,6 +59,36 @@ async def _aget_cached_safe(cache, text: str):
     except Exception as e:
         logger.warning("Cache get failed: %s", e)
         return None
+
+
+async def _enqueue_for_worker(
+    task_id: str,
+    items_payload: List[dict],
+    queue_items: List[dict],
+    *,
+    source: Optional[str],
+    user_id: Optional[int] = None,
+    preferred_model: Optional[str] = None,
+) -> None:
+    """create_task_pg → publish_task_request; при падении publish помечает задачу failed."""
+    await create_task_pg(task_id, items_payload, source=source, user_id=user_id)
+    try:
+        await publish_task_request(
+            task_id,
+            queue_items,
+            source=source,
+            preferred_model=preferred_model,
+        )
+    except Exception as e:
+        logger.warning("Publish failed after create_task_pg task_id=%s: %s", task_id, e)
+        try:
+            await set_task_failed_pg(task_id, f"Failed to enqueue: {e}")
+        except Exception as mark_err:
+            logger.exception("Failed to mark task failed after publish error: %s", mark_err)
+        raise HTTPException(
+            status_code=503,
+            detail="Queue unavailable: failed to enqueue task",
+        ) from e
 
 
 async def _aget_cached_batch_safe(cache, texts: List[str]) -> List[Optional[dict]]:
@@ -98,13 +129,10 @@ async def classify(request: ClassifyRequest, request_ctx: Request):
             )
             return ClassifySubmitResponse(task_id=task_id)
 
-        # create_task_pg должен завершиться до publish: иначе воркер обновит ещё не
-        # вставленные task_items и потеряет результат.
-        with chain_timing.stage("api", "pg_create_task", task_id=task_id, n_items=1):
-            await create_task_pg(task_id, items_payload, source=source)
-        with chain_timing.stage("api", "mq_publish_request", task_id=task_id, n_items=1):
-            await publish_task_request(
+        with chain_timing.stage("api", "enqueue", task_id=task_id, n_items=1):
+            await _enqueue_for_worker(
                 task_id,
+                items_payload,
                 [{"text": request.text, "ref": {}}],
                 source=source,
                 preferred_model=request.preferred_model,
@@ -166,13 +194,13 @@ async def classify_batch_async(request: BatchAsyncRequest, request_ctx: Request)
         if n_miss == n_total:
             task_id = str(uuid.uuid4())
             items_for_queue = [{"text": item.text, "ref": {}} for item in request.items]
-            with chain_timing.stage("api", "pg_create_task", task_id=task_id, n_items=n_total):
-                await create_task_pg(task_id, items_payload, source=source, user_id=request.user_id)
-            with chain_timing.stage("api", "mq_publish_request", task_id=task_id, n_items=n_total):
-                await publish_task_request(
+            with chain_timing.stage("api", "enqueue", task_id=task_id, n_items=n_total):
+                await _enqueue_for_worker(
                     task_id,
+                    items_payload,
                     items_for_queue,
-                    source=request.source,
+                    source=source,
+                    user_id=request.user_id,
                     preferred_model=request.preferred_model,
                 )
             return BatchAsyncResponse(task_id=task_id)
@@ -196,13 +224,13 @@ async def classify_batch_async(request: BatchAsyncRequest, request_ctx: Request)
             )
 
         async def _handle_miss() -> None:
-            with chain_timing.stage("api", "pg_create_task", task_id=task_id_miss, n_items=n_miss):
-                await create_task_pg(task_id_miss, payload_miss, source=source, user_id=request.user_id)
-            with chain_timing.stage("api", "mq_publish_request", task_id=task_id_miss, n_items=n_miss):
-                await publish_task_request(
+            with chain_timing.stage("api", "enqueue", task_id=task_id_miss, n_items=n_miss):
+                await _enqueue_for_worker(
                     task_id_miss,
+                    payload_miss,
                     items_miss_for_queue,
-                    source=request.source,
+                    source=source,
+                    user_id=request.user_id,
                     preferred_model=request.preferred_model,
                 )
 
@@ -235,12 +263,18 @@ async def get_task_status(task_id: str, task_store: TaskStore = Depends(get_task
 
 
 @router.get("/health", response_model=HealthResponse, tags=["monitoring"])
-async def health_check():
-    """Проверка доступности API (очередь и бэкенд не проверяются)."""
+async def health_check(request_ctx: Request):
+    """Ping Postgres, Redis и RabbitMQ; status: healthy | degraded | unhealthy."""
+    cache = get_moderation_cache(request_ctx)
+    redis_client = getattr(cache, "_redis", None)
+    status, dependencies = await check_dependencies(redis_client)
     return HealthResponse(
-        status="healthy",
+        status=status,
         version=__version__,
-        model_info={"note": "Classification runs in backend worker"},
+        model_info={
+            "note": "Classification runs in backend worker",
+            "dependencies": dependencies,
+        },
     )
 
 
