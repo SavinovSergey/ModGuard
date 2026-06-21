@@ -288,6 +288,8 @@ python scripts/spam/validate_spam.py \
 cold cache, 4× backend. Capacity-дамп (`batch_size=1000`) даёт потолок ~16k msg/s;
 batch e2e при перегрузке ~2 s — метрика потолка, не SLA.
 
+Стек I/O: asyncpg, aio-pika, redis.asyncio; worker async с ProcessPool для ML.
+
 ```bash
 # Prod: batch=1000 при 10k msg/s
 .venv/bin/python scripts/run/validate_chain.py \
