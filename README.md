@@ -38,7 +38,7 @@ Docker Compose поднимает все сервисы (API, worker, Redis, Pos
 
 ```bash
 # 1. Клонируйте репозиторий
-git clone https://github.com/SergeySavinov/ModGuard.git
+git clone https://github.com/SavinovSergey/ModGuard.git
 cd ModGuard
 
 # 2. Скопируйте пример конфигурации и при необходимости отредактируйте
